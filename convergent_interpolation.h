@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -14,6 +15,17 @@ using qreal = double;
 #endif
 
 namespace geo::convergent {
+
+// Способ, которым готовый проект восстанавливает поверхность внутри ячейки.
+// Режим должен совпадать с построением индексного буфера отображаемого mesh.
+enum class CellInterpolation {
+    Bilinear,
+    // Диагональ: нижний левый узел -> верхний правый узел.
+    TriangleBottomLeftToTopRight,
+    // Диагональ: нижний правый узел -> верхний левый узел.
+    // Это распространённый порядок для регулярного треугольного mesh.
+    TriangleBottomRightToTopLeft,
+};
 
 // Внутреннее представление входной точки. Пользовательскому проекту не нужно
 // заменять им собственный Point: шаблонная перегрузка ниже выполнит конверсию.
@@ -33,17 +45,25 @@ struct Options {
     qreal relativeTolerance = 1e-9;
     qreal smoothness = 1;
 
-    // Относительная жёсткость привязки. 1e6 соответствует почти жёстким
-    // точкам во время сглаживания. При enforcePointConstraints == true после
-    // сглаживания дополнительно выполняется точная проекция на точки.
-    qreal dataWeight = 1e6;
+    CellInterpolation cellInterpolation =
+        CellInterpolation::TriangleBottomRightToTopLeft;
+
+    // Начальный штраф за невязку. В жёстком режиме это стартовый параметр
+    // расширенного Лагранжиана, а не замена точного ограничения.
+    qreal dataWeight = 1e3;
     qreal regularization = 1e-10;
     bool ignoreOutsidePoints = false;
 
-    // Гарантирует B(point) * surface == point.value с заданной относительной
-    // точностью. B(point) — билинейная интерполяция четырёх узлов ячейки.
+    // Необязательная маска отображаемых узлов размером nx * ny:
+    // 0 — узел отсутствует в rendered mesh, ненулевое значение — активен.
+    // Объект маски должен существовать до завершения interpolate().
+    const std::vector<std::uint8_t>* activeNodeMask = nullptr;
+
+    // Решает задачу минимальной кривизны при ограничениях
+    // B(point) * surface == point.value.
     bool enforcePointConstraints = true;
-    std::size_t maxConstraintProjectionIterations = 10000;
+    std::size_t maxConstraintIterations = 30;
+    qreal constraintPenaltyGrowth = 5;
     qreal pointConstraintRelativeTolerance = 1e-9;
 };
 
@@ -52,7 +72,7 @@ struct Report {
     std::size_t totalIterations = 0;
     qreal maxAbsolutePointResidual = 0;
     qreal weightedRmsPointResidual = 0;
-    std::size_t constraintProjectionIterations = 0;
+    std::size_t constraintIterations = 0;
     bool pointConstraintsSatisfied = false;
     bool converged = false;
 };
@@ -84,6 +104,20 @@ Report interpolate(
     std::size_t ny,
     const std::vector<Sample>& points,
     const Options& options = {});
+
+// Вычисляет высоту именно по той модели ячейки, которая используется для
+// ограничений. Полезно для независимой проверки против rendered mesh.
+qreal evaluateSurface(
+    const std::vector<qreal>& surfaceValues,
+    qreal minx,
+    qreal maxx,
+    qreal miny,
+    qreal maxy,
+    std::size_t nx,
+    std::size_t ny,
+    qreal x,
+    qreal y,
+    CellInterpolation interpolation);
 
 namespace detail {
 
@@ -165,6 +199,27 @@ Report interpolate(
         static_cast<std::size_t>(surface.ny),
         points,
         options);
+}
+
+template <typename SurfaceT,
+          std::enable_if_t<detail::IsCompatibleSurface<SurfaceT>::value, int> = 0>
+qreal evaluateSurface(
+    const SurfaceT& surface,
+    qreal x,
+    qreal y,
+    CellInterpolation interpolation)
+{
+    return evaluateSurface(
+        surface.values,
+        static_cast<qreal>(surface.minx),
+        static_cast<qreal>(surface.maxx),
+        static_cast<qreal>(surface.miny),
+        static_cast<qreal>(surface.maxy),
+        static_cast<std::size_t>(surface.nx),
+        static_cast<std::size_t>(surface.ny),
+        x,
+        y,
+        interpolation);
 }
 
 } // namespace geo::convergent

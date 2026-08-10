@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <utility>
 
@@ -85,15 +86,16 @@ void validateOptions(const Options& options)
         throw std::invalid_argument(
             "convergent::interpolate: maxIterationsPerLevel must be positive");
     }
-    if (options.enforcePointConstraints
-        && options.maxConstraintProjectionIterations == 0) {
+    if (options.enforcePointConstraints && options.maxConstraintIterations == 0) {
         throw std::invalid_argument(
-            "convergent::interpolate: maxConstraintProjectionIterations must be positive");
+            "convergent::interpolate: maxConstraintIterations must be positive");
     }
     if (!finite(options.relativeTolerance) || options.relativeTolerance <= 0
         || !finite(options.smoothness) || options.smoothness <= 0
         || !finite(options.dataWeight) || options.dataWeight <= 0
         || !finite(options.regularization) || options.regularization <= 0
+        || !finite(options.constraintPenaltyGrowth)
+        || options.constraintPenaltyGrowth < 1
         || !finite(options.pointConstraintRelativeTolerance)
         || options.pointConstraintRelativeTolerance <= 0) {
         throw std::invalid_argument(
@@ -333,43 +335,221 @@ void validateOptions(const Options& options)
     return target;
 }
 
-[[nodiscard]] std::vector<PointStencil> makePointStencils(
-    const GridGeometry& grid,
-    const std::vector<Sample>& points)
+[[nodiscard]] std::array<qreal, 4> interpolationCoefficients(
+    qreal fx,
+    qreal fy,
+    CellInterpolation interpolation)
 {
-    std::vector<PointStencil> stencils;
-    stencils.reserve(points.size());
-
-    const qreal dx = grid.dx();
-    const qreal dy = grid.dy();
-    for (const Sample& point : points) {
-        const qreal gx = (point.x - grid.minx) / dx;
-        const qreal gy = (point.y - grid.miny) / dy;
-        const std::size_t ix = std::min<std::size_t>(
-            static_cast<std::size_t>(std::floor(gx)), grid.nx - 2);
-        const std::size_t iy = std::min<std::size_t>(
-            static_cast<std::size_t>(std::floor(gy)), grid.ny - 2);
-        const qreal fx = std::clamp(gx - static_cast<qreal>(ix), qreal(0), qreal(1));
-        const qreal fy = std::clamp(gy - static_cast<qreal>(iy), qreal(0), qreal(1));
-
-        PointStencil stencil;
-        stencil.index = {
-            surfaceIndex(ix, iy, grid.nx),
-            surfaceIndex(ix + 1, iy, grid.nx),
-            surfaceIndex(ix, iy + 1, grid.nx),
-            surfaceIndex(ix + 1, iy + 1, grid.nx),
-        };
-        stencil.coefficient = {
+    switch (interpolation) {
+    case CellInterpolation::Bilinear:
+        return {
             (1 - fx) * (1 - fy),
             fx * (1 - fy),
             (1 - fx) * fy,
             fx * fy,
         };
-        stencil.value = point.value;
-        stencil.weight = point.weight;
-        stencils.push_back(stencil);
+
+    case CellInterpolation::TriangleBottomLeftToTopRight:
+        if (fy <= fx) {
+            // Треугольник: bottom-left, bottom-right, top-right.
+            return {1 - fx, fx - fy, 0, fy};
+        }
+        // Треугольник: bottom-left, top-left, top-right.
+        return {1 - fy, 0, fy - fx, fx};
+
+    case CellInterpolation::TriangleBottomRightToTopLeft:
+        if (fx + fy <= 1) {
+            // Треугольник: bottom-left, bottom-right, top-left.
+            return {1 - fx - fy, fx, fy, 0};
+        }
+        // Треугольник: bottom-right, top-left, top-right.
+        return {0, 1 - fy, 1 - fx, fx + fy - 1};
+    }
+    throw std::invalid_argument("convergent::interpolate: unknown cell interpolation");
+}
+
+[[nodiscard]] PointStencil makePointStencil(
+    const GridGeometry& grid,
+    const Sample& point,
+    CellInterpolation interpolation)
+{
+    const qreal dx = grid.dx();
+    const qreal dy = grid.dy();
+    const qreal gx = (point.x - grid.minx) / dx;
+    const qreal gy = (point.y - grid.miny) / dy;
+    const std::size_t ix = std::min<std::size_t>(
+        static_cast<std::size_t>(std::floor(gx)), grid.nx - 2);
+    const std::size_t iy = std::min<std::size_t>(
+        static_cast<std::size_t>(std::floor(gy)), grid.ny - 2);
+    const qreal fx = std::clamp(gx - static_cast<qreal>(ix), qreal(0), qreal(1));
+    const qreal fy = std::clamp(gy - static_cast<qreal>(iy), qreal(0), qreal(1));
+
+    PointStencil stencil;
+    stencil.index = {
+        surfaceIndex(ix, iy, grid.nx),
+        surfaceIndex(ix + 1, iy, grid.nx),
+        surfaceIndex(ix, iy + 1, grid.nx),
+        surfaceIndex(ix + 1, iy + 1, grid.nx),
+    };
+    stencil.coefficient = interpolationCoefficients(fx, fy, interpolation);
+    stencil.value = point.value;
+    stencil.weight = point.weight;
+    return stencil;
+}
+
+[[nodiscard]] std::vector<PointStencil> makePointStencils(
+    const GridGeometry& grid,
+    const std::vector<Sample>& points,
+    CellInterpolation interpolation)
+{
+    std::vector<PointStencil> stencils;
+    stencils.reserve(points.size());
+    for (const Sample& point : points) {
+        stencils.push_back(makePointStencil(grid, point, interpolation));
     }
     return stencils;
+}
+
+void validateActivePointSupport(
+    const std::vector<PointStencil>& stencils,
+    const std::vector<std::uint8_t>* activeNodeMask,
+    std::size_t expectedNodeCount)
+{
+    if (activeNodeMask == nullptr) {
+        return;
+    }
+    if (activeNodeMask->size() != expectedNodeCount) {
+        throw std::invalid_argument(
+            "convergent::interpolate: activeNodeMask size must be nx * ny");
+    }
+
+    const qreal coefficientTolerance =
+        64 * std::numeric_limits<qreal>::epsilon();
+    for (const PointStencil& stencil : stencils) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            if (stencil.coefficient[i] > coefficientTolerance
+                && (*activeNodeMask)[stencil.index[i]] == 0) {
+                throw std::out_of_range(
+                    "convergent::interpolate: a point is located on an inactive "
+                    "or clipped mesh cell");
+            }
+        }
+    }
+}
+
+[[nodiscard]] std::size_t matrixRank(
+    std::vector<std::vector<qreal>> matrix,
+    qreal relativeTolerance)
+{
+    if (matrix.empty() || matrix.front().empty()) {
+        return 0;
+    }
+    const std::size_t rowCount = matrix.size();
+    const std::size_t columnCount = matrix.front().size();
+
+    // Масштабирование столбцов делает сравнение коэффициентов формы и
+    // геологических отметок независимым от единиц Z.
+    for (std::size_t column = 0; column < columnCount; ++column) {
+        qreal scale = 0;
+        for (std::size_t row = 0; row < rowCount; ++row) {
+            scale = std::max(scale, std::abs(matrix[row][column]));
+        }
+        if (scale > 0) {
+            for (std::size_t row = 0; row < rowCount; ++row) {
+                matrix[row][column] /= scale;
+            }
+        }
+    }
+
+    const qreal tolerance = std::max<qreal>(
+        256 * std::numeric_limits<qreal>::epsilon(), relativeTolerance);
+    std::size_t rank = 0;
+    for (std::size_t column = 0;
+         column < columnCount && rank < rowCount;
+         ++column) {
+        std::size_t pivot = rank;
+        for (std::size_t row = rank + 1; row < rowCount; ++row) {
+            if (std::abs(matrix[row][column]) > std::abs(matrix[pivot][column])) {
+                pivot = row;
+            }
+        }
+        if (std::abs(matrix[pivot][column]) <= tolerance) {
+            continue;
+        }
+        std::swap(matrix[pivot], matrix[rank]);
+        const qreal pivotValue = matrix[rank][column];
+        for (std::size_t j = column; j < columnCount; ++j) {
+            matrix[rank][j] /= pivotValue;
+        }
+        for (std::size_t row = 0; row < rowCount; ++row) {
+            if (row == rank) {
+                continue;
+            }
+            const qreal factor = matrix[row][column];
+            for (std::size_t j = column; j < columnCount; ++j) {
+                matrix[row][j] -= factor * matrix[rank][j];
+            }
+        }
+        ++rank;
+    }
+    return rank;
+}
+
+void validateLocalConstraintCompatibility(
+    const std::vector<PointStencil>& stencils,
+    qreal relativeTolerance)
+{
+    using Support = std::array<std::size_t, 4>;
+    const std::size_t unused = std::numeric_limits<std::size_t>::max();
+    const qreal coefficientTolerance =
+        64 * std::numeric_limits<qreal>::epsilon();
+
+    std::map<Support, std::vector<const PointStencil*>> groups;
+    for (const PointStencil& stencil : stencils) {
+        Support support{unused, unused, unused, unused};
+        std::size_t count = 0;
+        for (std::size_t i = 0; i < 4; ++i) {
+            if (stencil.coefficient[i] > coefficientTolerance) {
+                support[count++] = stencil.index[i];
+            }
+        }
+        std::sort(support.begin(), support.begin() + count);
+        groups[support].push_back(&stencil);
+    }
+
+    for (const auto& [support, group] : groups) {
+        std::size_t supportSize = 0;
+        while (supportSize < support.size() && support[supportSize] != unused) {
+            ++supportSize;
+        }
+        std::vector<std::vector<qreal>> coefficients(
+            group.size(), std::vector<qreal>(supportSize));
+        std::vector<std::vector<qreal>> augmented(
+            group.size(), std::vector<qreal>(supportSize + 1));
+        for (std::size_t row = 0; row < group.size(); ++row) {
+            const PointStencil& stencil = *group[row];
+            for (std::size_t local = 0; local < supportSize; ++local) {
+                for (std::size_t i = 0; i < 4; ++i) {
+                    if (stencil.index[i] == support[local]) {
+                        coefficients[row][local] = stencil.coefficient[i];
+                        augmented[row][local] = stencil.coefficient[i];
+                    }
+                }
+            }
+            augmented[row][supportSize] = stencil.value;
+        }
+
+        const std::size_t coefficientRank = matrixRank(
+            coefficients, relativeTolerance);
+        const std::size_t augmentedRank = matrixRank(
+            augmented, relativeTolerance);
+        if (augmentedRank > coefficientRank) {
+            throw std::invalid_argument(
+                "convergent::interpolate: point data cannot be represented by "
+                "the selected grid resolution and triangle topology; refine the "
+                "grid or use a mesh containing the control points as vertices");
+        }
+    }
 }
 
 template <std::size_t Count>
@@ -591,6 +771,31 @@ void addPointDiagonal(
     return rhs;
 }
 
+[[nodiscard]] Vector buildAugmentedRightHandSide(
+    std::size_t size,
+    const std::vector<PointStencil>& stencils,
+    qreal penalty,
+    const Vector& lagrangeMultiplier,
+    const Vector& trend,
+    qreal ridge)
+{
+    Vector rhs(size, 0);
+    for (std::size_t pointIndex = 0; pointIndex < stencils.size(); ++pointIndex) {
+        const PointStencil& stencil = stencils[pointIndex];
+        // L(z, lambda) = E(z) + lambda*c + penalty*w*c^2/2,
+        // где c = B*z - value.
+        const qreal scaled = penalty * stencil.weight * stencil.value
+            - lagrangeMultiplier[pointIndex];
+        for (std::size_t i = 0; i < 4; ++i) {
+            rhs[stencil.index[i]] += stencil.coefficient[i] * scaled;
+        }
+    }
+    for (std::size_t i = 0; i < size; ++i) {
+        rhs[i] += ridge * trend[i];
+    }
+    return rhs;
+}
+
 [[nodiscard]] qreal dot(const Vector& left, const Vector& right)
 {
     qreal result = 0;
@@ -688,70 +893,115 @@ template <typename ApplyOperator>
     return result;
 }
 
-[[nodiscard]] qreal relativeConstraintResidual(
-    const PointStencil& stencil,
-    const Vector& values)
-{
-    const qreal absoluteResidual = std::abs(evaluateStencil(stencil, values) - stencil.value);
-    return absoluteResidual / std::max<qreal>(1, std::abs(stencil.value));
-}
-
-struct ProjectionResult {
-    std::size_t iterations = 0;
-    bool satisfied = false;
+struct ConstraintStatistics {
+    qreal maxAbsoluteResidual = 0;
+    qreal maxRelativeResidual = 0;
+    qreal weightedSquaredResidual = 0;
+    qreal totalWeight = 0;
 };
 
-void projectSingleConstraint(const PointStencil& stencil, Vector& values)
+[[nodiscard]] ConstraintStatistics constraintStatistics(
+    const std::vector<PointStencil>& stencils,
+    const Vector& values)
 {
-    qreal interpolated = 0;
-    qreal squaredNorm = 0;
-    for (std::size_t i = 0; i < 4; ++i) {
-        interpolated += stencil.coefficient[i] * values[stencil.index[i]];
-        squaredNorm += stencil.coefficient[i] * stencil.coefficient[i];
+    ConstraintStatistics statistics;
+    for (const PointStencil& stencil : stencils) {
+        const qreal residual = evaluateStencil(stencil, values) - stencil.value;
+        statistics.maxAbsoluteResidual = std::max(
+            statistics.maxAbsoluteResidual, std::abs(residual));
+        statistics.maxRelativeResidual = std::max(
+            statistics.maxRelativeResidual,
+            std::abs(residual) / std::max<qreal>(1, std::abs(stencil.value)));
+        statistics.weightedSquaredResidual += stencil.weight * residual * residual;
+        statistics.totalWeight += stencil.weight;
     }
-
-    // Ортогональная проекция на гиперплоскость B_i * z = value_i.
-    const qreal correction = (stencil.value - interpolated) / squaredNorm;
-    for (std::size_t i = 0; i < 4; ++i) {
-        values[stencil.index[i]] += correction * stencil.coefficient[i];
-    }
+    return statistics;
 }
 
-[[nodiscard]] ProjectionResult enforcePointConstraints(
-    Vector& values,
+struct ConstrainedSolverResult {
+    std::size_t iterations = 0;
+    std::size_t linearIterations = 0;
+    bool linearSolvesConverged = true;
+    bool constraintsSatisfied = false;
+};
+
+[[nodiscard]] ConstrainedSolverResult solveConstrainedMinimumCurvature(
+    const GridGeometry& grid,
+    const Vector& trend,
     const std::vector<PointStencil>& stencils,
-    std::size_t maxIterations,
-    qreal relativeTolerance)
+    const Options& options,
+    Vector& values)
 {
-    const auto constraintsSatisfied = [&]() {
-        for (const PointStencil& stencil : stencils) {
-            if (relativeConstraintResidual(stencil, values) > relativeTolerance) {
-                return false;
+    const qreal curvatureScale = meanPositive(curvatureDiagonal(grid, 1));
+    const Vector curvature = curvatureDiagonal(grid, options.smoothness);
+    const qreal ridge = options.regularization * curvatureScale;
+    qreal penalty = options.dataWeight * curvatureScale;
+    Vector lagrangeMultiplier(stencils.size(), 0);
+
+    ConstrainedSolverResult result;
+    qreal previousResidual = std::numeric_limits<qreal>::infinity();
+
+    for (std::size_t iteration = 1;
+         iteration <= options.maxConstraintIterations;
+         ++iteration) {
+        Vector diagonal = curvature;
+        addPointDiagonal(stencils, penalty, diagonal);
+        for (qreal& value : diagonal) {
+            value += ridge;
+        }
+
+        const Vector rhs = buildAugmentedRightHandSide(
+            values.size(), stencils, penalty, lagrangeMultiplier, trend, ridge);
+        const auto applyOperator = [&](const Vector& input, Vector& output) {
+            std::fill(output.begin(), output.end(), 0);
+            addCurvatureOperator(grid, options.smoothness, input, output);
+            addPointOperator(stencils, penalty, input, output);
+            for (std::size_t i = 0; i < input.size(); ++i) {
+                output[i] += ridge * input[i];
+            }
+        };
+
+        const SolverResult linearSolve = preconditionedConjugateGradient(
+            values,
+            rhs,
+            diagonal,
+            applyOperator,
+            options.maxIterationsPerLevel,
+            std::min(options.relativeTolerance,
+                options.pointConstraintRelativeTolerance * qreal(0.1)));
+        result.iterations = iteration;
+        result.linearIterations += linearSolve.iterations;
+        result.linearSolvesConverged =
+            result.linearSolvesConverged && linearSolve.converged;
+
+        const ConstraintStatistics statistics = constraintStatistics(stencils, values);
+        if (statistics.maxRelativeResidual
+            <= options.pointConstraintRelativeTolerance) {
+            result.constraintsSatisfied = true;
+            return result;
+        }
+
+        for (std::size_t pointIndex = 0;
+             pointIndex < stencils.size();
+             ++pointIndex) {
+            const PointStencil& stencil = stencils[pointIndex];
+            const qreal residual = evaluateStencil(stencil, values) - stencil.value;
+            lagrangeMultiplier[pointIndex] += penalty * stencil.weight * residual;
+        }
+
+        // При стагнации усиливаем штраф. Множители остаются в немасштабной
+        // форме и поэтому не требуют пересчёта при изменении penalty.
+        if (statistics.maxRelativeResidual > previousResidual * qreal(0.7)
+            && options.constraintPenaltyGrowth > 1) {
+            const qreal safeLimit = std::numeric_limits<qreal>::max()
+                / options.constraintPenaltyGrowth;
+            if (penalty <= safeLimit) {
+                penalty *= options.constraintPenaltyGrowth;
             }
         }
-        return true;
-    };
-
-    if (constraintsSatisfied()) {
-        return {0, true};
+        previousResidual = statistics.maxRelativeResidual;
     }
-
-    // Симметричные проходы Качмаржа уменьшают зависимость результата от
-    // исходного порядка points. Для совместной системы проекции сходятся к
-    // поверхности, проходящей через каждую точку.
-    for (std::size_t iteration = 1; iteration <= maxIterations; ++iteration) {
-        for (const PointStencil& stencil : stencils) {
-            projectSingleConstraint(stencil, values);
-        }
-        for (auto iterator = stencils.rbegin(); iterator != stencils.rend(); ++iterator) {
-            projectSingleConstraint(*iterator, values);
-        }
-
-        if (constraintsSatisfied()) {
-            return {iteration, true};
-        }
-    }
-    return {maxIterations, false};
+    return result;
 }
 
 } // namespace
@@ -774,6 +1024,15 @@ Report interpolate(
         surface, points, options.ignoreOutsidePoints);
     const Plane plane = fitPlane(surface, validPoints);
     const auto levels = buildLevels(surface.nx, surface.ny, options);
+    const GridGeometry finalGrid = surface;
+    const std::vector<PointStencil> finalStencils = makePointStencils(
+        finalGrid, validPoints, options.cellInterpolation);
+    if (options.enforcePointConstraints) {
+        validateLocalConstraintCompatibility(
+            finalStencils, options.pointConstraintRelativeTolerance);
+    }
+    validateActivePointSupport(
+        finalStencils, options.activeNodeMask, finalGrid.nx * finalGrid.ny);
 
     Report report;
     report.levelsUsed = levels.size();
@@ -793,7 +1052,8 @@ Report interpolate(
             values = resample(values, previousNx, previousNy, nx, ny);
         }
 
-        const std::vector<PointStencil> stencils = makePointStencils(grid, validPoints);
+        const std::vector<PointStencil> stencils = makePointStencils(
+            grid, validPoints, options.cellInterpolation);
         const qreal curvatureScale = meanPositive(curvatureDiagonal(grid, 1));
         Vector diagonal = curvatureDiagonal(grid, options.smoothness);
         const qreal dataScale = options.dataWeight * curvatureScale;
@@ -828,46 +1088,63 @@ Report interpolate(
         previousNy = ny;
     }
 
-    const GridGeometry finalGrid{
-        surface.minx, surface.maxx, surface.miny, surface.maxy, surface.nx, surface.ny};
-    const std::vector<PointStencil> finalStencils = makePointStencils(finalGrid, validPoints);
-
     if (options.enforcePointConstraints) {
-        const ProjectionResult projection = enforcePointConstraints(
-            values,
+        const Vector finalTrend = evaluatePlane(finalGrid, plane);
+        const ConstrainedSolverResult constrained = solveConstrainedMinimumCurvature(
+            finalGrid,
+            finalTrend,
             finalStencils,
-            options.maxConstraintProjectionIterations,
-            options.pointConstraintRelativeTolerance);
-        report.constraintProjectionIterations = projection.iterations;
-        report.pointConstraintsSatisfied = projection.satisfied;
-        if (!projection.satisfied) {
+            options,
+            values);
+        report.constraintIterations = constrained.iterations;
+        report.totalIterations += constrained.linearIterations;
+        report.converged = report.converged && constrained.linearSolvesConverged;
+        report.pointConstraintsSatisfied = constrained.constraintsSatisfied;
+        if (!constrained.constraintsSatisfied) {
             throw std::runtime_error(
                 "convergent::interpolate: hard point constraints are inconsistent "
-                "or projection did not converge");
+                "with the selected mesh interpolation or the constrained solver "
+                "did not converge");
         }
     }
 
     surfaceValues = std::move(values);
 
-    qreal weightedSquaredResidual = 0;
-    qreal totalWeight = 0;
-    qreal maxRelativePointResidual = 0;
-    for (const PointStencil& stencil : finalStencils) {
-        const qreal residual = evaluateStencil(stencil, surfaceValues) - stencil.value;
-        report.maxAbsolutePointResidual = std::max(
-            report.maxAbsolutePointResidual, std::abs(residual));
-        weightedSquaredResidual += stencil.weight * residual * residual;
-        totalWeight += stencil.weight;
-        maxRelativePointResidual = std::max(
-            maxRelativePointResidual,
-            std::abs(residual) / std::max<qreal>(1, std::abs(stencil.value)));
-    }
-    report.weightedRmsPointResidual = std::sqrt(weightedSquaredResidual / totalWeight);
+    const ConstraintStatistics finalStatistics = constraintStatistics(
+        finalStencils, surfaceValues);
+    report.maxAbsolutePointResidual = finalStatistics.maxAbsoluteResidual;
+    report.weightedRmsPointResidual = std::sqrt(
+        finalStatistics.weightedSquaredResidual / finalStatistics.totalWeight);
     if (!options.enforcePointConstraints) {
-        report.pointConstraintsSatisfied = maxRelativePointResidual
+        report.pointConstraintsSatisfied = finalStatistics.maxRelativeResidual
             <= options.pointConstraintRelativeTolerance;
     }
     return report;
+}
+
+qreal evaluateSurface(
+    const std::vector<qreal>& surfaceValues,
+    qreal minx,
+    qreal maxx,
+    qreal miny,
+    qreal maxy,
+    std::size_t nx,
+    std::size_t ny,
+    qreal x,
+    qreal y,
+    CellInterpolation interpolation)
+{
+    const GridGeometry grid{minx, maxx, miny, maxy, nx, ny};
+    validateSurface(grid);
+    if (surfaceValues.size() != nx * ny) {
+        throw std::invalid_argument(
+            "convergent::evaluateSurface: values size must be nx * ny");
+    }
+
+    const std::vector<Sample> checked = validateAndFilterPoints(
+        grid, std::vector<Sample>{{x, y, 0, 1}}, false);
+    const PointStencil stencil = makePointStencil(grid, checked.front(), interpolation);
+    return evaluateStencil(stencil, surfaceValues);
 }
 
 } // namespace geo::convergent
