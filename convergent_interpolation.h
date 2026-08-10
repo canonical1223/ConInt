@@ -34,10 +34,17 @@ struct Options {
     qreal smoothness = 1;
 
     // Относительная жёсткость привязки. 1e6 соответствует почти жёстким
-    // точкам; для шумных данных обычно разумнее 1e2..1e4.
+    // точкам во время сглаживания. При enforcePointConstraints == true после
+    // сглаживания дополнительно выполняется точная проекция на точки.
     qreal dataWeight = 1e6;
     qreal regularization = 1e-10;
     bool ignoreOutsidePoints = false;
+
+    // Гарантирует B(point) * surface == point.value с заданной относительной
+    // точностью. B(point) — билинейная интерполяция четырёх узлов ячейки.
+    bool enforcePointConstraints = true;
+    std::size_t maxConstraintProjectionIterations = 10000;
+    qreal pointConstraintRelativeTolerance = 1e-9;
 };
 
 struct Report {
@@ -45,6 +52,8 @@ struct Report {
     std::size_t totalIterations = 0;
     qreal maxAbsolutePointResidual = 0;
     qreal weightedRmsPointResidual = 0;
+    std::size_t constraintProjectionIterations = 0;
+    bool pointConstraintsSatisfied = false;
     bool converged = false;
 };
 

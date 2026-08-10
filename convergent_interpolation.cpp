@@ -85,10 +85,17 @@ void validateOptions(const Options& options)
         throw std::invalid_argument(
             "convergent::interpolate: maxIterationsPerLevel must be positive");
     }
+    if (options.enforcePointConstraints
+        && options.maxConstraintProjectionIterations == 0) {
+        throw std::invalid_argument(
+            "convergent::interpolate: maxConstraintProjectionIterations must be positive");
+    }
     if (!finite(options.relativeTolerance) || options.relativeTolerance <= 0
         || !finite(options.smoothness) || options.smoothness <= 0
         || !finite(options.dataWeight) || options.dataWeight <= 0
-        || !finite(options.regularization) || options.regularization <= 0) {
+        || !finite(options.regularization) || options.regularization <= 0
+        || !finite(options.pointConstraintRelativeTolerance)
+        || options.pointConstraintRelativeTolerance <= 0) {
         throw std::invalid_argument(
             "convergent::interpolate: numerical options must be finite and positive");
     }
@@ -681,6 +688,72 @@ template <typename ApplyOperator>
     return result;
 }
 
+[[nodiscard]] qreal relativeConstraintResidual(
+    const PointStencil& stencil,
+    const Vector& values)
+{
+    const qreal absoluteResidual = std::abs(evaluateStencil(stencil, values) - stencil.value);
+    return absoluteResidual / std::max<qreal>(1, std::abs(stencil.value));
+}
+
+struct ProjectionResult {
+    std::size_t iterations = 0;
+    bool satisfied = false;
+};
+
+void projectSingleConstraint(const PointStencil& stencil, Vector& values)
+{
+    qreal interpolated = 0;
+    qreal squaredNorm = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        interpolated += stencil.coefficient[i] * values[stencil.index[i]];
+        squaredNorm += stencil.coefficient[i] * stencil.coefficient[i];
+    }
+
+    // Ортогональная проекция на гиперплоскость B_i * z = value_i.
+    const qreal correction = (stencil.value - interpolated) / squaredNorm;
+    for (std::size_t i = 0; i < 4; ++i) {
+        values[stencil.index[i]] += correction * stencil.coefficient[i];
+    }
+}
+
+[[nodiscard]] ProjectionResult enforcePointConstraints(
+    Vector& values,
+    const std::vector<PointStencil>& stencils,
+    std::size_t maxIterations,
+    qreal relativeTolerance)
+{
+    const auto constraintsSatisfied = [&]() {
+        for (const PointStencil& stencil : stencils) {
+            if (relativeConstraintResidual(stencil, values) > relativeTolerance) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (constraintsSatisfied()) {
+        return {0, true};
+    }
+
+    // Симметричные проходы Качмаржа уменьшают зависимость результата от
+    // исходного порядка points. Для совместной системы проекции сходятся к
+    // поверхности, проходящей через каждую точку.
+    for (std::size_t iteration = 1; iteration <= maxIterations; ++iteration) {
+        for (const PointStencil& stencil : stencils) {
+            projectSingleConstraint(stencil, values);
+        }
+        for (auto iterator = stencils.rbegin(); iterator != stencils.rend(); ++iterator) {
+            projectSingleConstraint(*iterator, values);
+        }
+
+        if (constraintsSatisfied()) {
+            return {iteration, true};
+        }
+    }
+    return {maxIterations, false};
+}
+
 } // namespace
 
 Report interpolate(
@@ -755,21 +828,45 @@ Report interpolate(
         previousNy = ny;
     }
 
-    surfaceValues = std::move(values);
-
     const GridGeometry finalGrid{
         surface.minx, surface.maxx, surface.miny, surface.maxy, surface.nx, surface.ny};
     const std::vector<PointStencil> finalStencils = makePointStencils(finalGrid, validPoints);
+
+    if (options.enforcePointConstraints) {
+        const ProjectionResult projection = enforcePointConstraints(
+            values,
+            finalStencils,
+            options.maxConstraintProjectionIterations,
+            options.pointConstraintRelativeTolerance);
+        report.constraintProjectionIterations = projection.iterations;
+        report.pointConstraintsSatisfied = projection.satisfied;
+        if (!projection.satisfied) {
+            throw std::runtime_error(
+                "convergent::interpolate: hard point constraints are inconsistent "
+                "or projection did not converge");
+        }
+    }
+
+    surfaceValues = std::move(values);
+
     qreal weightedSquaredResidual = 0;
     qreal totalWeight = 0;
+    qreal maxRelativePointResidual = 0;
     for (const PointStencil& stencil : finalStencils) {
         const qreal residual = evaluateStencil(stencil, surfaceValues) - stencil.value;
         report.maxAbsolutePointResidual = std::max(
             report.maxAbsolutePointResidual, std::abs(residual));
         weightedSquaredResidual += stencil.weight * residual * residual;
         totalWeight += stencil.weight;
+        maxRelativePointResidual = std::max(
+            maxRelativePointResidual,
+            std::abs(residual) / std::max<qreal>(1, std::abs(stencil.value)));
     }
     report.weightedRmsPointResidual = std::sqrt(weightedSquaredResidual / totalWeight);
+    if (!options.enforcePointConstraints) {
+        report.pointConstraintsSatisfied = maxRelativePointResidual
+            <= options.pointConstraintRelativeTolerance;
+    }
     return report;
 }
 
