@@ -48,10 +48,23 @@ struct Report {
     bool converged = false;
 };
 
+// Порядок хранения поверхности:
+//   iy = 0      — нижняя строка (y = miny),
+//   iy = ny - 1 — верхняя строка  (y = maxy),
+// внутри строки ix растёт слева направо: minx -> maxx.
+[[nodiscard]] constexpr std::size_t surfaceIndex(
+    std::size_t ix,
+    std::size_t iy,
+    std::size_t nx) noexcept
+{
+    return iy * nx + ix;
+}
+
 // Основной ABI: не зависит от пользовательских типов Surface и Point.
 //
 // nx и ny — число узлов, включая границы. Результат записывается построчно:
-// surfaceValues[iy * nx + ix]. Старое содержимое surfaceValues не используется.
+// surfaceValues[surfaceIndex(ix, iy, nx)]. Первый элемент соответствует
+// нижнему левому углу (minx, miny). Старое содержимое не используется.
 Report interpolate(
     std::vector<qreal>& surfaceValues,
     qreal minx,

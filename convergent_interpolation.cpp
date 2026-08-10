@@ -255,7 +255,7 @@ void validateOptions(const Options& options)
         const qreal y = grid.miny + static_cast<qreal>(iy) * dy;
         for (std::size_t ix = 0; ix < grid.nx; ++ix) {
             const qreal x = grid.minx + static_cast<qreal>(ix) * dx;
-            values[iy * grid.nx + ix] = plane.evaluate(x, y);
+            values[surfaceIndex(ix, iy, grid.nx)] = plane.evaluate(x, y);
         }
     }
     return values;
@@ -314,11 +314,11 @@ void validateOptions(const Options& options)
             const std::size_t x1 = x0 + 1;
             const qreal fx = sourceX - static_cast<qreal>(x0);
 
-            const qreal z00 = source[y0 * sourceNx + x0];
-            const qreal z10 = source[y0 * sourceNx + x1];
-            const qreal z01 = source[y1 * sourceNx + x0];
-            const qreal z11 = source[y1 * sourceNx + x1];
-            target[targetY * targetNx + targetX] =
+            const qreal z00 = source[surfaceIndex(x0, y0, sourceNx)];
+            const qreal z10 = source[surfaceIndex(x1, y0, sourceNx)];
+            const qreal z01 = source[surfaceIndex(x0, y1, sourceNx)];
+            const qreal z11 = source[surfaceIndex(x1, y1, sourceNx)];
+            target[surfaceIndex(targetX, targetY, targetNx)] =
                 (1 - fy) * ((1 - fx) * z00 + fx * z10)
                 + fy * ((1 - fx) * z01 + fx * z11);
         }
@@ -347,10 +347,10 @@ void validateOptions(const Options& options)
 
         PointStencil stencil;
         stencil.index = {
-            iy * grid.nx + ix,
-            iy * grid.nx + ix + 1,
-            (iy + 1) * grid.nx + ix,
-            (iy + 1) * grid.nx + ix + 1,
+            surfaceIndex(ix, iy, grid.nx),
+            surfaceIndex(ix + 1, iy, grid.nx),
+            surfaceIndex(ix, iy + 1, grid.nx),
+            surfaceIndex(ix + 1, iy + 1, grid.nx),
         };
         stencil.coefficient = {
             (1 - fx) * (1 - fy),
@@ -422,9 +422,9 @@ void addCurvatureOperator(
         for (std::size_t ix = 1; ix + 1 < grid.nx; ++ix) {
             addQuadraticStencil(
                 std::array<std::size_t, 3>{
-                    iy * grid.nx + ix - 1,
-                    iy * grid.nx + ix,
-                    iy * grid.nx + ix + 1},
+                    surfaceIndex(ix - 1, iy, grid.nx),
+                    surfaceIndex(ix, iy, grid.nx),
+                    surfaceIndex(ix + 1, iy, grid.nx)},
                 dxx,
                 pureScale,
                 input,
@@ -435,9 +435,9 @@ void addCurvatureOperator(
         for (std::size_t ix = 0; ix < grid.nx; ++ix) {
             addQuadraticStencil(
                 std::array<std::size_t, 3>{
-                    (iy - 1) * grid.nx + ix,
-                    iy * grid.nx + ix,
-                    (iy + 1) * grid.nx + ix},
+                    surfaceIndex(ix, iy - 1, grid.nx),
+                    surfaceIndex(ix, iy, grid.nx),
+                    surfaceIndex(ix, iy + 1, grid.nx)},
                 dyy,
                 pureScale,
                 input,
@@ -448,10 +448,10 @@ void addCurvatureOperator(
         for (std::size_t ix = 0; ix + 1 < grid.nx; ++ix) {
             addQuadraticStencil(
                 std::array<std::size_t, 4>{
-                    iy * grid.nx + ix,
-                    iy * grid.nx + ix + 1,
-                    (iy + 1) * grid.nx + ix,
-                    (iy + 1) * grid.nx + ix + 1},
+                    surfaceIndex(ix, iy, grid.nx),
+                    surfaceIndex(ix + 1, iy, grid.nx),
+                    surfaceIndex(ix, iy + 1, grid.nx),
+                    surfaceIndex(ix + 1, iy + 1, grid.nx)},
                 dxy,
                 mixedScale,
                 input,
@@ -483,9 +483,9 @@ void addCurvatureOperator(
         for (std::size_t ix = 1; ix + 1 < grid.nx; ++ix) {
             addQuadraticStencilDiagonal(
                 std::array<std::size_t, 3>{
-                    iy * grid.nx + ix - 1,
-                    iy * grid.nx + ix,
-                    iy * grid.nx + ix + 1},
+                    surfaceIndex(ix - 1, iy, grid.nx),
+                    surfaceIndex(ix, iy, grid.nx),
+                    surfaceIndex(ix + 1, iy, grid.nx)},
                 dxx,
                 pureScale,
                 diagonal);
@@ -495,9 +495,9 @@ void addCurvatureOperator(
         for (std::size_t ix = 0; ix < grid.nx; ++ix) {
             addQuadraticStencilDiagonal(
                 std::array<std::size_t, 3>{
-                    (iy - 1) * grid.nx + ix,
-                    iy * grid.nx + ix,
-                    (iy + 1) * grid.nx + ix},
+                    surfaceIndex(ix, iy - 1, grid.nx),
+                    surfaceIndex(ix, iy, grid.nx),
+                    surfaceIndex(ix, iy + 1, grid.nx)},
                 dyy,
                 pureScale,
                 diagonal);
@@ -507,10 +507,10 @@ void addCurvatureOperator(
         for (std::size_t ix = 0; ix + 1 < grid.nx; ++ix) {
             addQuadraticStencilDiagonal(
                 std::array<std::size_t, 4>{
-                    iy * grid.nx + ix,
-                    iy * grid.nx + ix + 1,
-                    (iy + 1) * grid.nx + ix,
-                    (iy + 1) * grid.nx + ix + 1},
+                    surfaceIndex(ix, iy, grid.nx),
+                    surfaceIndex(ix + 1, iy, grid.nx),
+                    surfaceIndex(ix, iy + 1, grid.nx),
+                    surfaceIndex(ix + 1, iy + 1, grid.nx)},
                 dxy,
                 mixedScale,
                 diagonal);
