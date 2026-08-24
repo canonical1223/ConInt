@@ -6,24 +6,18 @@
 #include <utility>
 #include <vector>
 
+// В Qt-проекте используется qreal из QtCore/qglobal.h.
 #if __has_include(<QtCore/qglobal.h>)
 #include <QtCore/qglobal.h>
 #else
-// Нужен только для автономной сборки тестов. В Qt-проекте используется
-// qreal из QtCore/qglobal.h.
 using qreal = double;
 #endif
 
 namespace geo::convergent {
 
-// Способ, которым готовый проект восстанавливает поверхность внутри ячейки.
-// Режим должен совпадать с построением индексного буфера отображаемого mesh.
 enum class CellInterpolation {
     Bilinear,
-    // Диагональ: нижний левый узел -> верхний правый узел.
     TriangleBottomLeftToTopRight,
-    // Диагональ: нижний правый узел -> верхний левый узел.
-    // Это распространённый порядок для регулярного треугольного mesh.
     TriangleBottomRightToTopLeft,
 };
 
@@ -43,6 +37,7 @@ struct Options {
 
     std::size_t maxIterationsPerLevel = 1500;
     qreal relativeTolerance = 1e-9;
+    // Вес screened-biharmonic энергии многоуровневых поправок.
     qreal smoothness = 1;
 
     CellInterpolation cellInterpolation =
@@ -64,7 +59,14 @@ struct Options {
     bool enforcePointConstraints = true;
     std::size_t maxConstraintIterations = 30;
     qreal constraintPenaltyGrowth = 5;
-    qreal pointConstraintRelativeTolerance = 1e-9;
+    qreal pointConstraintRelativeTolerance = 1e-12;
+
+    // После расширенного Лагранжиана выполняются одновременные глобальные
+    // screened-biharmonic defect-corrections для B*surface == point.value.
+    // В отличие от локальной/евклидовой проекции они сохраняют гладкость и
+    // не зависят от порядка точек. Поля ниже ограничивают эту полировку.
+    std::size_t maxExactProjectionIterations = 5000;
+    std::size_t maxExactProjectionPasses = 3;
 };
 
 struct Report {
@@ -73,6 +75,7 @@ struct Report {
     qreal maxAbsolutePointResidual = 0;
     qreal weightedRmsPointResidual = 0;
     std::size_t constraintIterations = 0;
+    std::size_t exactProjectionIterations = 0;
     bool pointConstraintsSatisfied = false;
     bool converged = false;
 };
