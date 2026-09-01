@@ -1,0 +1,553 @@
+# =============================================================================
+# GeoSchemeDocs.cmake
+# Р¦РµРЅС‚СЂР°Р»РёР·РѕРІР°РЅРЅС‹Р№ РјРѕРґСѓР»СЊ СЃР±РѕСЂРєРё QDoc-РґРѕРєСѓРјРµРЅС‚Р°С†РёРё РґР»СЏ РџРћ В«Р“РµРѕСЃС…РµРјР°В».
+#
+# РџРѕРґРєР»СЋС‡Р°РµС‚СЃСЏ РёР· РєРѕСЂРЅРµРІРѕРіРѕ CMakeLists.txt Р‘Р•Р— СѓСЃР»РѕРІРёСЏ:
+#   include(GeoSchemeDocs.cmake)
+#
+# РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ РІ РјРѕРґСѓР»СЊРЅРѕРј CMakeLists.txt:
+#   if (GEOSCHEME_BUILD_DOCS)
+#       gs_add_doc_target(GeoProjectData GeoProjectData.qdocconf)
+#   endif()
+#
+# РџРѕСЃР»Рµ РІСЃРµС… add_subdirectory() РІ РєРѕСЂРЅРµРІРѕРј CMakeLists.txt:
+#   gs_finalize_doc_index()
+#
+# Р—Р°РїСѓСЃРє РґРѕРєСѓРјРµРЅС‚Р°С†РёРё (С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ РїРѕР»РЅРѕР№ СЃР±РѕСЂРєРё РїСЂРѕРµРєС‚Р°):
+#   mingw32-make docs_GeoScheme_index
+#
+# РџРµСЂРµСЃР±РѕСЂРєР° РѕРґРЅРѕРіРѕ РјРѕРґСѓР»СЏ:
+#   mingw32-make docs_GeoProjectData_rebuild
+#
+# РџРѕР»РЅР°СЏ РїРµСЂРµСЃР±РѕСЂРєР° РІСЃРµР№ РґРѕРєСѓРјРµРЅС‚Р°С†РёРё СЃ РЅСѓР»СЏ:
+#   mingw32-make docs_rebuild_all
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Р’РЅСѓС‚СЂРµРЅРЅРёР№ РјР°РєСЂРѕСЃ: РїРѕРёСЃРє qdoc С‡РµСЂРµР· Qt5::Core LOCATION.
+# Р РµР·СѓР»СЊС‚Р°С‚ РєРµС€РёСЂСѓРµС‚СЃСЏ РІ QDOC_EXECUTABLE - РїРѕРІС‚РѕСЂРЅС‹Рµ РІС‹Р·РѕРІС‹ РјРіРЅРѕРІРµРЅРЅС‹.
+# -----------------------------------------------------------------------------
+macro(_gs_find_qdoc)
+    if (NOT QDOC_EXECUTABLE)
+        find_package(Qt5 REQUIRED COMPONENTS Core)
+
+        get_target_property(_gs_qt_loc Qt5::Core LOCATION)
+        get_filename_component(_gs_qt_lib  "${_gs_qt_loc}"    DIRECTORY)
+        get_filename_component(_gs_qt_root "${_gs_qt_lib}/.." ABSOLUTE)
+
+        if (WIN32)
+            set(QDOC_EXECUTABLE "${_gs_qt_root}/bin/qdoc.exe"
+                CACHE FILEPATH "Path to qdoc executable" FORCE)
+        else()
+            set(QDOC_EXECUTABLE "${_gs_qt_root}/bin/qdoc"
+                CACHE FILEPATH "Path to qdoc executable" FORCE)
+        endif()
+
+        if (NOT EXISTS "${QDOC_EXECUTABLE}")
+            message(FATAL_ERROR "[Docs] qdoc not found in: ${_gs_qt_root}/bin")
+        endif()
+
+        message(STATUS "[Docs] qdoc found: ${QDOC_EXECUTABLE}")
+    endif()
+endmacro()
+
+
+# -----------------------------------------------------------------------------
+# Р’РЅСѓС‚СЂРµРЅРЅРёР№ РјР°РєСЂРѕСЃ: РІС‹С‡РёСЃР»СЏРµС‚ Qt-РѕРєСЂСѓР¶РµРЅРёРµ Рё РїСѓС‚Рё Рє MinGW С‚СѓР»С‡РµР№РЅСѓ.
+#
+# Р’СЃРµ РїСѓС‚Рё РІС‹С‡РёСЃР»СЏСЋС‚СЃСЏ РёР· СЂРµР°Р»СЊРЅРѕР№ СЃС‚СЂСѓРєС‚СѓСЂС‹ РґРёСЂРµРєС‚РѕСЂРёР№ Qt РЅР° РґРёСЃРєРµ.
+# execute_process СЃ qmake РЅРµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ - РЅРµРЅР°РґРµР¶РµРЅ РІРЅСѓС‚СЂРё CMake.
+#
+# РЎС‚СЂСѓРєС‚СѓСЂР° РґРёСЂРµРєС‚РѕСЂРёР№ Qt (РёР· Qt Creator Kit):
+#   C:\Qt\Qt5.14.2\                         <- _gs_qt_sdk_root
+#       5.14.2\
+#           mingw73_64\                     <- _gs_qt_root, _gs_qt_prefix
+#               include\                    <- _gs_qt_headers
+#               bin\qdoc.exe
+#       Docs\
+#           Qt-5.14.2\                      <- _gs_qt_docs
+#       Tools\
+#           mingw730_64\                    <- _gs_mingw_root
+#               lib\gcc\x86_64-w64-mingw32\7.3.0\include\c++\  <- _gs_mingw_cxx
+# -----------------------------------------------------------------------------
+macro(_gs_compute_qt_env)
+    get_filename_component(_gs_qt_cmake "${Qt5Core_DIR}"  DIRECTORY)
+    get_filename_component(_gs_qt_lib   "${_gs_qt_cmake}" DIRECTORY)
+    get_filename_component(_gs_qt_root  "${_gs_qt_lib}"   DIRECTORY)
+
+    get_filename_component(_gs_qt_ver_root "${_gs_qt_root}/.."     ABSOLUTE)
+    get_filename_component(_gs_qt_sdk_root "${_gs_qt_ver_root}/.." ABSOLUTE)
+
+    set(_gs_qt_prefix  "${_gs_qt_root}")
+    set(_gs_qt_headers "${_gs_qt_root}/include")
+    set(_gs_qt_version "${Qt5Core_VERSION}")
+    set(_gs_qt_docs    "${_gs_qt_sdk_root}/Docs/Qt-${_gs_qt_version}")
+
+    set(_gs_mingw_root "${_gs_qt_sdk_root}/Tools/mingw730_64")
+
+    if (NOT EXISTS "${_gs_mingw_root}")
+        message(WARNING "[Docs] MinGW not found: ${_gs_mingw_root}")
+        find_program(_gs_gcc_exe NAMES gcc g++ mingw32-g++)
+        if (_gs_gcc_exe)
+            get_filename_component(_gs_gcc_bin    "${_gs_gcc_exe}"    DIRECTORY)
+            get_filename_component(_gs_mingw_root "${_gs_gcc_bin}/.." ABSOLUTE)
+            message(STATUS "[Docs] MinGW found via gcc: ${_gs_mingw_root}")
+        else()
+            message(WARNING "[Docs] MinGW not found - C++ standard headers unavailable")
+        endif()
+    endif()
+
+    set(_gs_mingw_cxx      "${_gs_mingw_root}/lib/gcc/x86_64-w64-mingw32/7.3.0/include/c++")
+    set(_gs_mingw_cxx_arch "${_gs_mingw_cxx}/x86_64-w64-mingw32")
+    set(_gs_mingw_cxx_back "${_gs_mingw_cxx}/backward")
+    set(_gs_mingw_inc      "${_gs_mingw_root}/lib/gcc/x86_64-w64-mingw32/7.3.0/include")
+    set(_gs_mingw_sys      "${_gs_mingw_root}/x86_64-w64-mingw32/include")
+
+    if (NOT EXISTS "${_gs_qt_docs}")
+        message(WARNING "[Docs] Qt docs not found: ${_gs_qt_docs}")
+        message(WARNING "[Docs] Install Qt Documentation via Qt Maintenance Tool.")
+    else()
+        foreach(_gs_conf compat macros qt-cpp-defines fileextensions)
+            if (NOT EXISTS "${_gs_qt_docs}/global/${_gs_conf}.qdocconf")
+                message(WARNING
+                    "[Docs] Missing: ${_gs_qt_docs}/global/${_gs_conf}.qdocconf")
+            endif()
+        endforeach()
+    endif()
+
+    message(STATUS "[Docs] Qt root            = ${_gs_qt_root}")
+    message(STATUS "[Docs] QT_INSTALL_PREFIX  = ${_gs_qt_prefix}")
+    message(STATUS "[Docs] QT_INSTALL_HEADERS = ${_gs_qt_headers}")
+    message(STATUS "[Docs] QT_INSTALL_DOCS    = ${_gs_qt_docs}")
+    message(STATUS "[Docs] MinGW root         = ${_gs_mingw_root}")
+    message(STATUS "[Docs] MinGW C++          = ${_gs_mingw_cxx}")
+endmacro()
+
+
+# -----------------------------------------------------------------------------
+# Р’РЅСѓС‚СЂРµРЅРЅРёР№ РјР°РєСЂРѕСЃ: РІС‹С‡РёСЃР»СЏРµС‚ Р±РµР·РѕРїР°СЃРЅС‹Р№ PATH РґР»СЏ Р·Р°РїСѓСЃРєР° qdoc.
+#
+# РЈР±РёСЂР°РµС‚ Qt 5.12.x РёР· PATH - embedded clang Р°РІС‚РѕРґРµС‚РµРєС‚РёСЂСѓРµС‚ GCC С‡РµСЂРµР·
+# PATH (gcc -v) Рё РјРѕР¶РµС‚ РЅР°Р№С‚Рё СЃС‚Р°СЂС‹Р№ MinGW -> РѕС€РёР±РєРё type_traits.
+# Qt 5.14.x СЃС‚Р°РІРёРј РїРµСЂРІС‹Рј.
+#
+# Р’РђР–РќРћ: РІС‹Р·С‹РІР°С‚СЊ С‚РѕР»СЊРєРѕ РџРћРЎР›Р• _gs_compute_qt_env().
+# -----------------------------------------------------------------------------
+macro(_gs_compute_safe_path)
+    if (NOT DEFINED _gs_qt_root OR NOT DEFINED _gs_mingw_root)
+        message(FATAL_ERROR
+            "[Docs] _gs_compute_safe_path() called before _gs_compute_qt_env()!")
+    endif()
+
+    if (DEFINED ENV{PATH})
+        set(_gs_orig_path "$ENV{PATH}")
+
+        string(REGEX REPLACE
+            "[^;]*Qt5\\.12\\.[^;]*;?" ""
+            _gs_safe_path "${_gs_orig_path}")
+
+        string(REGEX REPLACE
+            "[^;]*Tools[\\/]mingw730_64[\\/]bin;?" ""
+            _gs_safe_path "${_gs_safe_path}")
+
+        set(_gs_safe_path
+            "${_gs_qt_root}/bin;${_gs_mingw_root}/bin;${_gs_safe_path}")
+
+        message(STATUS "[Docs] Safe PATH = ${_gs_safe_path}")
+    else()
+        set(_gs_safe_path "")
+    endif()
+endmacro()
+
+
+# -----------------------------------------------------------------------------
+# _gs_collect_includes(TARGET OUT_INCLUDES OUT_TARGETS VISITED)
+#
+# Р РµРєСѓСЂСЃРёРІРЅРѕ РѕР±С…РѕРґРёС‚ РіСЂР°С„ Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ С‚Р°СЂРіРµС‚Р° (target_link_libraries)
+# Рё СЃРѕР±РёСЂР°РµС‚ Р’РЎР• СѓРЅРёРєР°Р»СЊРЅС‹Рµ include-РїСѓС‚Рё РёР·:
+#   - INCLUDE_DIRECTORIES        (РїСЂРёРІР°С‚РЅС‹Рµ РїСѓС‚Рё С‚Р°СЂРіРµС‚Р°)
+#   - INTERFACE_INCLUDE_DIRECTORIES (РїСѓР±Р»РёС‡РЅС‹Рµ РїСѓС‚Рё РґР»СЏ РїРѕС‚СЂРµР±РёС‚РµР»РµР№)
+#   - LINK_LIBRARIES             (СЂРµРєСѓСЂСЃРёРІРЅРѕ РїРѕ РІСЃРµРј Р·Р°РІРёСЃРёРјРѕСЃС‚СЏРј)
+#   - INTERFACE_LINK_LIBRARIES   (СЂРµРєСѓСЂСЃРёРІРЅРѕ РїРѕ РёРЅС‚РµСЂС„РµР№СЃРЅС‹Рј Р·Р°РІРёСЃРёРјРѕСЃС‚СЏРј)
+#
+# Р—Р°С‰РёС‚Р° РѕС‚ С†РёРєР»РёС‡РµСЃРєРёС… Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ С‡РµСЂРµР· СЃРїРёСЃРѕРє VISITED.
+# Generator expressions РІРёРґР° $<BUILD_INTERFACE:path> СЂР°СЃРєСЂС‹РІР°СЋС‚СЃСЏ,
+# РѕСЃС‚Р°Р»СЊРЅС‹Рµ ($<CONFIG:...> Рё С‚.Рї.) РїСЂРѕРїСѓСЃРєР°СЋС‚СЃСЏ.
+# -----------------------------------------------------------------------------
+function(_gs_collect_includes TARGET OUT_INCLUDES OUT_TARGETS VISITED)
+
+    # Р—Р°С‰РёС‚Р° РѕС‚ С†РёРєР»РѕРІ Рё РїРѕРІС‚РѕСЂРЅРѕР№ РѕР±СЂР°Р±РѕС‚РєРё
+    if ("${TARGET}" IN_LIST VISITED)
+        return()
+    endif()
+
+    if (NOT TARGET ${TARGET})
+        return()
+    endif()
+
+    list(APPEND VISITED "${TARGET}")
+    set(${OUT_TARGETS} "${VISITED}" PARENT_SCOPE)
+
+    set(_local_includes "")
+
+    # INCLUDE_DIRECTORIES - РїСЂРёРІР°С‚РЅС‹Рµ РїСѓС‚Рё С‚Р°СЂРіРµС‚Р°
+    get_target_property(_dirs ${TARGET} INCLUDE_DIRECTORIES)
+    if (_dirs)
+        foreach(_dir ${_dirs})
+            if (_dir MATCHES "\\$<BUILD_INTERFACE:(.+)>")
+                list(APPEND _local_includes "${CMAKE_MATCH_1}")
+            elseif (NOT _dir MATCHES "\\$<")
+                list(APPEND _local_includes "${_dir}")
+            endif()
+        endforeach()
+    endif()
+
+    # INTERFACE_INCLUDE_DIRECTORIES - РїСѓР±Р»РёС‡РЅС‹Рµ РїСѓС‚Рё
+    get_target_property(_idirs ${TARGET} INTERFACE_INCLUDE_DIRECTORIES)
+    if (_idirs)
+        foreach(_dir ${_idirs})
+            if (_dir MATCHES "\\$<BUILD_INTERFACE:(.+)>")
+                list(APPEND _local_includes "${CMAKE_MATCH_1}")
+            elseif (NOT _dir MATCHES "\\$<")
+                list(APPEND _local_includes "${_dir}")
+            endif()
+        endforeach()
+    endif()
+
+    # Р РµРєСѓСЂСЃРёРІРЅС‹Р№ РѕР±С…РѕРґ LINK_LIBRARIES
+    get_target_property(_libs ${TARGET} LINK_LIBRARIES)
+    if (_libs)
+        foreach(_lib ${_libs})
+            if (_lib MATCHES "\\$<" OR NOT TARGET ${_lib})
+                continue()
+            endif()
+            if ("${_lib}" IN_LIST VISITED)
+                continue()
+            endif()
+
+            set(_sub_includes "")
+            set(_sub_visited "${VISITED}")
+            _gs_collect_includes("${_lib}" _sub_includes _sub_visited "${_sub_visited}")
+            list(APPEND _local_includes ${_sub_includes})
+            set(VISITED "${_sub_visited}")
+            set(${OUT_TARGETS} "${VISITED}" PARENT_SCOPE)
+        endforeach()
+    endif()
+
+    # Р РµРєСѓСЂСЃРёРІРЅС‹Р№ РѕР±С…РѕРґ INTERFACE_LINK_LIBRARIES
+    get_target_property(_ilibs ${TARGET} INTERFACE_LINK_LIBRARIES)
+    if (_ilibs)
+        foreach(_lib ${_ilibs})
+            if (_lib MATCHES "\\$<" OR NOT TARGET ${_lib})
+                continue()
+            endif()
+            if ("${_lib}" IN_LIST VISITED)
+                continue()
+            endif()
+
+            set(_sub_includes "")
+            set(_sub_visited "${VISITED}")
+            _gs_collect_includes("${_lib}" _sub_includes _sub_visited "${_sub_visited}")
+            list(APPEND _local_includes ${_sub_includes})
+            set(VISITED "${_sub_visited}")
+            set(${OUT_TARGETS} "${VISITED}" PARENT_SCOPE)
+        endforeach()
+    endif()
+
+    set(${OUT_INCLUDES} ${_local_includes} PARENT_SCOPE)
+
+endfunction()
+
+
+# -----------------------------------------------------------------------------
+# _gs_build_include_path_args(MODULE_NAME QT_HEADERS MINGW_PATHS OUT_ARGS)
+#
+# РЎРѕР±РёСЂР°РµС‚ РїРѕР»РЅС‹Р№ СЃРїРёСЃРѕРє --include-path Р°СЂРіСѓРјРµРЅС‚РѕРІ РґР»СЏ РєРѕРјР°РЅРґРЅРѕР№ СЃС‚СЂРѕРєРё qdoc:
+#   1. MinGW СЃС‚Р°РЅРґР°СЂС‚РЅС‹Рµ Р·Р°РіРѕР»РѕРІРєРё C++ (type_traits, cstddef Рё С‚.Рї.)
+#   2. Qt Р·Р°РіРѕР»РѕРІРєРё (РІСЃРµ РѕСЃРЅРѕРІРЅС‹Рµ РїРѕРґРјРѕРґСѓР»Рё)
+#   3. Р’СЃРµ include-РїСѓС‚Рё РёР· MODULE_NAME Рё РµРіРѕ Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ (СЂРµРєСѓСЂСЃРёРІРЅРѕ)
+#
+# --include-path РїРµСЂРµРґР°РµС‚ РїСѓС‚Рё РЅР°РїСЂСЏРјСѓСЋ РІ embedded clang - РѕРЅРё СЂР°Р±РѕС‚Р°СЋС‚
+# Р”Рћ Рё Р’Рћ Р’Р Р•РњРЇ СЃР±РѕСЂРєРё PCH РІ Temp-РїР°РїРєРµ, РіРґРµ РїРµСЂРµРјРµРЅРЅС‹Рµ РѕРєСЂСѓР¶РµРЅРёСЏ
+# MINGW_* РёР· .qdocconf РЅРµРґРѕСЃС‚СѓРїРЅС‹.
+# -----------------------------------------------------------------------------
+function(_gs_build_include_path_args MODULE_NAME QT_HEADERS MINGW_PATHS OUT_ARGS)
+
+    set(_args "")
+
+    # 1. MinGW СЃС‚Р°РЅРґР°СЂС‚РЅС‹Рµ Р·Р°РіРѕР»РѕРІРєРё C++
+    foreach(_mingw_path ${MINGW_PATHS})
+        if (EXISTS "${_mingw_path}")
+            list(APPEND _args "--include-path" "${_mingw_path}")
+        endif()
+    endforeach()
+
+    # 2. Qt Р·Р°РіРѕР»РѕРІРєРё - РІСЃРµ РѕСЃРЅРѕРІРЅС‹Рµ РїРѕРґРјРѕРґСѓР»Рё
+    foreach(_sub "" "QtCore" "QtGui" "QtWidgets" "QtXml"
+                    "QtSql" "QtNetwork" "QtSvg" "QtPrintSupport" "QtConcurrent")
+        if (_sub STREQUAL "")
+            set(_qt_path "${QT_HEADERS}")
+        else()
+            set(_qt_path "${QT_HEADERS}/${_sub}")
+        endif()
+        if (EXISTS "${_qt_path}")
+            list(APPEND _args "--include-path" "${_qt_path}")
+        endif()
+    endforeach()
+
+    # 3. Р РµРєСѓСЂСЃРёРІРЅС‹Р№ СЃР±РѕСЂ РёР· С‚Р°СЂРіРµС‚Р° Рё РІСЃРµС… РµРіРѕ Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№
+    if (TARGET ${MODULE_NAME})
+        set(_visited "")
+        set(_module_includes "")
+        _gs_collect_includes(
+            "${MODULE_NAME}"
+            _module_includes
+            _visited
+            "${_visited}"
+        )
+
+        if (_module_includes)
+            list(REMOVE_DUPLICATES _module_includes)
+            set(_count 0)
+            foreach(_inc ${_module_includes})
+                if (EXISTS "${_inc}")
+                    list(APPEND _args "--include-path" "${_inc}")
+                    math(EXPR _count "${_count} + 1")
+                endif()
+            endforeach()
+            message(STATUS
+                "[Docs] ${MODULE_NAME}: added ${_count} include paths from target graph")
+        endif()
+    else()
+        message(WARNING
+            "[Docs] ${MODULE_NAME}: target not found, include paths not collected")
+    endif()
+
+    set(${OUT_ARGS} "${_args}" PARENT_SCOPE)
+
+endfunction()
+
+
+# -----------------------------------------------------------------------------
+# gs_add_doc_target(MODULE_NAME QDOCCONF_FILENAME)
+#
+# Р РµРіРёСЃС‚СЂРёСЂСѓРµС‚ СЃР±РѕСЂРєСѓ РґРѕРєСѓРјРµРЅС‚Р°С†РёРё РѕРґРЅРѕРіРѕ РјРѕРґСѓР»СЏ.
+#
+# Include-РїСѓС‚Рё СЃРѕР±РёСЂР°СЋС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё РёР· С‚Р°СЂРіРµС‚Р° MODULE_NAME Рё РІСЃРµС…
+# РµРіРѕ С‚СЂР°РЅР·РёС‚РёРІРЅС‹С… Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ (С‡РµСЂРµР· target_link_libraries СЂРµРєСѓСЂСЃРёРІРЅРѕ).
+# Р­С‚Рѕ РѕР·РЅР°С‡Р°РµС‚ С‡С‚Рѕ РґР»СЏ РЅРѕРІРѕРіРѕ РјРѕРґСѓР»СЏ РґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РѕРґРЅРѕР№ СЃС‚СЂРѕРєРё РІС‹Р·РѕРІР° -
+# РЅРµ РЅСѓР¶РЅРѕ РІСЂСѓС‡РЅСѓСЋ РїСЂРѕРїРёСЃС‹РІР°С‚СЊ РїСѓС‚Рё РІ .qdocconf.
+#
+# РўР°СЂРіРµС‚ РќР• РІС…РѕРґРёС‚ РІ ALL - Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ СЏРІРЅРѕ РїРѕСЃР»Рµ РїРѕР»РЅРѕР№ СЃР±РѕСЂРєРё РїСЂРѕРµРєС‚Р°.
+# -----------------------------------------------------------------------------
+function(gs_add_doc_target MODULE_NAME QDOCCONF_FILENAME)
+
+    if (NOT GEOSCHEME_BUILD_DOCS)
+        return()
+    endif()
+
+    _gs_find_qdoc()
+    _gs_compute_qt_env()
+    _gs_compute_safe_path()
+
+    get_filename_component(_gs_project_root "${CMAKE_SOURCE_DIR}" DIRECTORY)
+
+    set(_gs_html_root "${_gs_project_root}/doc/qdoc/html")
+    set(_gs_mod_conf  "${CMAKE_CURRENT_SOURCE_DIR}/${QDOCCONF_FILENAME}")
+    set(_gs_out_dir   "${_gs_html_root}/${MODULE_NAME}")
+    set(_gs_stamp     "${_gs_out_dir}/.cmake_docs_stamp")
+
+    message(STATUS "[Docs] ${MODULE_NAME}: out dir  = ${_gs_out_dir}")
+    message(STATUS "[Docs] ${MODULE_NAME}: mod conf = ${_gs_mod_conf}")
+
+    if (NOT EXISTS "${_gs_mod_conf}")
+        message(WARNING "[Docs] ${MODULE_NAME}: qdocconf not found: ${_gs_mod_conf}")
+    endif()
+
+    # РЎРѕР±РёСЂР°РµРј --include-path Р°СЂРіСѓРјРµРЅС‚С‹ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё
+    set(_gs_mingw_paths
+        "${_gs_mingw_cxx}"
+        "${_gs_mingw_cxx_arch}"
+        "${_gs_mingw_cxx_back}"
+        "${_gs_mingw_inc}"
+        "${_gs_mingw_sys}"
+    )
+
+    _gs_build_include_path_args(
+        "${MODULE_NAME}"
+        "${_gs_qt_headers}"
+        "${_gs_mingw_paths}"
+        _gs_include_path_args
+    )
+
+    if (IS_DIRECTORY "${_gs_out_dir}")
+        message(STATUS "[Docs] ${MODULE_NAME}: cache found - skip rebuild")
+        add_custom_target(docs_${MODULE_NAME})
+    else()
+        message(STATUS "[Docs] ${MODULE_NAME}: no cache - register build")
+
+        add_custom_command(
+            OUTPUT  "${_gs_stamp}"
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    "QT_INSTALL_DOCS=${_gs_qt_docs}"
+                    "QT_INSTALL_HEADERS=${_gs_qt_headers}"
+                    "QT_INSTALL_PREFIX=${_gs_qt_prefix}"
+                    "QT_VERSION=${_gs_qt_version}"
+                    "MINGW_CXX=${_gs_mingw_cxx}"
+                    "MINGW_CXX_ARCH=${_gs_mingw_cxx_arch}"
+                    "MINGW_CXX_BACK=${_gs_mingw_cxx_back}"
+                    "MINGW_INC=${_gs_mingw_inc}"
+                    "MINGW_SYS=${_gs_mingw_sys}"
+                    "INCLUDE="
+                    "CPLUS_INCLUDE_PATH="
+                    "C_INCLUDE_PATH="
+                    "PATH=${_gs_safe_path}"
+                    "${QDOC_EXECUTABLE}"
+                    --no-link-errors
+                    ${_gs_include_path_args}
+                    "${_gs_mod_conf}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gs_out_dir}"
+            COMMAND "${CMAKE_COMMAND}" -E touch "${_gs_stamp}"
+            DEPENDS "${_gs_mod_conf}"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMENT "[Docs] QDoc: ${MODULE_NAME}"
+            VERBATIM
+        )
+
+        add_custom_target(docs_${MODULE_NAME}
+            DEPENDS "${_gs_stamp}"
+        )
+    endif()
+
+    if (TARGET ${MODULE_NAME})
+        add_dependencies(docs_${MODULE_NAME} ${MODULE_NAME})
+        message(STATUS "[Docs] ${MODULE_NAME}: docs depends on ${MODULE_NAME}")
+    endif()
+
+    add_custom_target(docs_${MODULE_NAME}_rebuild
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory "${_gs_out_dir}"
+        COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}"
+                --target docs_${MODULE_NAME}
+        COMMENT "[Docs] Force rebuild docs: ${MODULE_NAME}"
+        VERBATIM
+    )
+
+    set_property(GLOBAL APPEND PROPERTY GS_DOC_MODULE_TARGETS "docs_${MODULE_NAME}")
+    set_property(GLOBAL APPEND PROPERTY GS_DOC_MODULE_STAMPS  "${_gs_stamp}")
+
+endfunction()
+
+
+# -----------------------------------------------------------------------------
+# gs_finalize_doc_index()
+#
+# Р’С‹Р·С‹РІР°РµС‚СЃСЏ РћР”РРќ Р РђР— РёР· РєРѕСЂРЅРµРІРѕРіРѕ CMakeLists.txt - РџРћРЎР›Р• РІСЃРµС… add_subdirectory().
+# РЎРѕР±РёСЂР°РµС‚ СЃРІРѕРґРЅС‹Р№ РёРЅРґРµРєСЃ GeoScheme.qdocconf.
+# РЈСЃС‚СЂР°РЅСЏРµС‚ РіРѕРЅРєСѓ - РёРЅРґРµРєСЃ РїРёС€РµС‚СЃСЏ СЃС‚СЂРѕРіРѕ РїРѕСЃР»Рµ РІСЃРµС… РјРѕРґСѓР»РµР№.
+# -----------------------------------------------------------------------------
+function(gs_finalize_doc_index)
+
+    if (NOT GEOSCHEME_BUILD_DOCS)
+        return()
+    endif()
+
+    _gs_find_qdoc()
+    _gs_compute_qt_env()
+    _gs_compute_safe_path()
+
+    get_filename_component(_gs_project_root "${CMAKE_SOURCE_DIR}" DIRECTORY)
+
+    set(_gs_html_root "${_gs_project_root}/doc/qdoc/html")
+    set(_gs_main_conf "${_gs_project_root}/doc/qdoc/main-index/GeoScheme.qdocconf")
+    set(_gs_out_dir   "${_gs_html_root}/GeoScheme")
+    set(_gs_stamp     "${_gs_out_dir}/.cmake_docs_stamp")
+
+    get_filename_component(_gs_main_conf_dir "${_gs_main_conf}" DIRECTORY)
+
+    get_property(_gs_module_targets GLOBAL PROPERTY GS_DOC_MODULE_TARGETS)
+    get_property(_gs_module_stamps  GLOBAL PROPERTY GS_DOC_MODULE_STAMPS)
+
+    message(STATUS "[Docs] GeoScheme index: modules   = ${_gs_module_targets}")
+    message(STATUS "[Docs] GeoScheme index: out dir   = ${_gs_out_dir}")
+    message(STATUS "[Docs] GeoScheme index: main conf = ${_gs_main_conf}")
+
+    if (NOT EXISTS "${_gs_main_conf}")
+        message(WARNING "[Docs] GeoScheme index: config not found: ${_gs_main_conf}")
+    endif()
+
+    # Р‘Р°Р·РѕРІС‹Рµ --include-path РґР»СЏ СЃРІРѕРґРЅРѕРіРѕ РёРЅРґРµРєСЃР° (MinGW + Qt)
+    set(_gs_index_include_args "")
+
+    foreach(_mingw_path
+            "${_gs_mingw_cxx}" "${_gs_mingw_cxx_arch}" "${_gs_mingw_cxx_back}"
+            "${_gs_mingw_inc}"  "${_gs_mingw_sys}")
+        if (EXISTS "${_mingw_path}")
+            list(APPEND _gs_index_include_args "--include-path" "${_mingw_path}")
+        endif()
+    endforeach()
+
+    foreach(_sub "" "QtCore" "QtGui" "QtWidgets" "QtXml"
+                    "QtSql" "QtNetwork" "QtSvg" "QtPrintSupport" "QtConcurrent")
+        if (_sub STREQUAL "")
+            set(_qt_path "${_gs_qt_headers}")
+        else()
+            set(_qt_path "${_gs_qt_headers}/${_sub}")
+        endif()
+        if (EXISTS "${_qt_path}")
+            list(APPEND _gs_index_include_args "--include-path" "${_qt_path}")
+        endif()
+    endforeach()
+
+    if (IS_DIRECTORY "${_gs_out_dir}")
+        message(STATUS "[Docs] GeoScheme index: cache found - skip rebuild")
+        add_custom_target(docs_GeoScheme_index)
+    else()
+        message(STATUS "[Docs] GeoScheme index: no cache - register build")
+
+        add_custom_command(
+            OUTPUT  "${_gs_stamp}"
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    "QT_INSTALL_DOCS=${_gs_qt_docs}"
+                    "QT_INSTALL_HEADERS=${_gs_qt_headers}"
+                    "QT_INSTALL_PREFIX=${_gs_qt_prefix}"
+                    "QT_VERSION=${_gs_qt_version}"
+                    "MINGW_CXX=${_gs_mingw_cxx}"
+                    "MINGW_CXX_ARCH=${_gs_mingw_cxx_arch}"
+                    "MINGW_CXX_BACK=${_gs_mingw_cxx_back}"
+                    "MINGW_INC=${_gs_mingw_inc}"
+                    "MINGW_SYS=${_gs_mingw_sys}"
+                    "INCLUDE="
+                    "CPLUS_INCLUDE_PATH="
+                    "C_INCLUDE_PATH="
+                    "PATH=${_gs_safe_path}"
+                    "${QDOC_EXECUTABLE}"
+                    --no-link-errors
+                    ${_gs_index_include_args}
+                    "${_gs_main_conf}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gs_out_dir}"
+            COMMAND "${CMAKE_COMMAND}" -E touch "${_gs_stamp}"
+            DEPENDS ${_gs_module_stamps} "${_gs_main_conf}"
+            WORKING_DIRECTORY "${_gs_main_conf_dir}"
+            COMMENT "[Docs] QDoc: GeoScheme index"
+            VERBATIM
+        )
+
+        add_custom_target(docs_GeoScheme_index
+            DEPENDS "${_gs_stamp}"
+        )
+    endif()
+
+    if (_gs_module_targets)
+        add_dependencies(docs_GeoScheme_index ${_gs_module_targets})
+    endif()
+
+    add_custom_target(docs_rebuild_all
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory "${_gs_html_root}"
+        COMMAND "${CMAKE_COMMAND}" --build "${CMAKE_BINARY_DIR}"
+                --target docs_GeoScheme_index
+        COMMENT "[Docs] Full documentation rebuild from scratch"
+        VERBATIM
+    )
+
+endfunction()
