@@ -14,8 +14,23 @@
 namespace convergent {
 namespace {
 
+// Внутренний pipeline реализации:
+//   1. проверить и канонизировать входные точки;
+//   2. построить иерархию сеток от грубой к исходному разрешению;
+//   3. на каждом уровне интерполировать prior, построить мягкие Snap/Taylor
+//      штрафы и решить minimum-curvature задачу методом PCG;
+//   4. на финальном уровне дополнительно учесть мягкие билинейные ограничения;
+//   5. при необходимости отдельной проекцией точно выполнить C*u = d;
+//   6. проверить точность после преобразования в qreal и атомарно записать grid.
+//
+// Gaussian Snap, билинейный перенос между уровнями, свободное поведение границ
+// и евклидова exact-проекция — численные решения этой реализации. Они не
+// выдаются за неизвестные внутренние детали алгоритма Petrel.
+
 using Scalar = double;
 
+// Канонический внутренний формат получается после сортировки, удаления точек
+// с нулевым весом и объединения точек с одинаковыми x/y.
 struct CanonicalPoint {
     Scalar x{};
     Scalar y{};
@@ -30,6 +45,8 @@ struct Grid {
     Scalar maxx{};
     Scalar miny{};
     Scalar maxy{};
+    // Тот же порядок, что у Surface::grid: iy == 0 соответствует y == miny,
+    // а index(ix, iy) идет слева направо и затем снизу вверх.
     std::vector<Scalar> values;
 
     std::size_t index(std::size_t ix, std::size_t iy) const noexcept
@@ -75,6 +92,12 @@ struct SolverResult {
     bool converged{};
 };
 
+struct ProjectionResult {
+    std::size_t iterations{};
+    Scalar maxError{};
+    bool converged{};
+};
+
 bool finite(Scalar value) noexcept
 {
     return std::isfinite(value);
@@ -101,13 +124,19 @@ void validateOptions(const ConvergentGriddingOptions& options)
         || options.maxLevels == 0 || options.maxSolverIterations == 0) {
         throw std::invalid_argument("gridding counts must be greater than zero");
     }
+    if (options.enforceExactControls
+        && options.maxControlProjectionIterations == 0) {
+        throw std::invalid_argument(
+            "maxControlProjectionIterations must be positive in exact-control mode");
+    }
     if (!nonNegativeFinite(options.smoothness)
         || !positiveFinite(options.priorWeight)
         || !nonNegativeFinite(options.snapStrength)
         || !nonNegativeFinite(options.finalPointStrength)
         || !positiveFinite(options.gaussianSigma)
         || !positiveFinite(options.relativeTolerance)
-        || !nonNegativeFinite(options.absoluteTolerance)) {
+        || !nonNegativeFinite(options.absoluteTolerance)
+        || !nonNegativeFinite(options.controlTolerance)) {
         throw std::invalid_argument("invalid convergent gridding numeric option");
     }
     const Scalar sigma = static_cast<Scalar>(options.gaussianSigma);
@@ -150,12 +179,12 @@ std::vector<CanonicalPoint> validateInput(
     }
 
     const std::size_t expected = checkedNodeCount(surface.nx, surface.ny);
-    if (surface.gorid.size() != expected) {
-        throw std::invalid_argument("surface.gorid.size() must equal surface.nx * surface.ny");
+    if (surface.grid.size() != expected) {
+        throw std::invalid_argument("surface.grid.size() must equal surface.nx * surface.ny");
     }
-    for (qreal value : surface.gorid) {
+    for (qreal value : surface.grid) {
         if (!finite(static_cast<Scalar>(value))) {
-            throw std::invalid_argument("surface.gorid must contain only finite values");
+            throw std::invalid_argument("surface.grid must contain only finite values");
         }
     }
 
@@ -183,8 +212,8 @@ std::vector<CanonicalPoint> validateInput(
         result.push_back(p);
     }
 
-    // A canonical order makes accumulation deterministic for any permutation of
-    // the same points.
+    // Канонический порядок делает накопление воспроизводимым и не зависящим от
+    // перестановки одного и того же набора входных точек.
     std::sort(result.begin(), result.end(), [](const CanonicalPoint& a, const CanonicalPoint& b) {
         if (a.x != b.x) return a.x < b.x;
         if (a.y != b.y) return a.y < b.y;
@@ -192,9 +221,9 @@ std::vector<CanonicalPoint> validateInput(
         return a.weight < b.weight;
     });
 
-    // Exact co-located controls are one physical constraint.  Combining them
-    // before normalisation makes {(z=10,w=1),(z=30,w=3)} exactly equivalent
-    // to {(z=25,w=4)} and avoids two redundant rank-one constraints.
+    // Совпадающие координаты задают одно физическое ограничение. Объединение до
+    // нормализации делает {(z=10,w=1),(z=30,w=3)} эквивалентным
+    // {(z=25,w=4)} и не создает повторяющиеся строки ограничений.
     std::vector<CanonicalPoint> grouped;
     grouped.reserve(result.size());
     for (std::size_t begin = 0; begin < result.size();) {
@@ -230,6 +259,8 @@ std::vector<CanonicalPoint> validateInput(
         maximumWeight = std::max(maximumWeight, point.weight);
     }
     if (options.normalizePointWeights && maximumWeight > 0) {
+        // Деление на общий максимум сохраняет относительные веса и делает
+        // результат инвариантным к умножению всех исходных весов на константу.
         for (CanonicalPoint& point : result) {
             point.weight /= maximumWeight;
         }
@@ -276,6 +307,12 @@ Scalar bilinearSample(const Grid& grid, Scalar x, Scalar y)
          + tx * ty * v11;
 }
 
+// Билинейный restriction/prolongation между сетками с одинаковыми min/max.
+// Эта функция используется и для перехода входной поверхности на грубую
+// сетку, и для уточнения решения предыдущего уровня. Последний узел каждой оси
+// явно ставится в maxx/maxy, чтобы не накопить ошибку округления координаты.
+// Производные отдельно не переносятся: на новом уровне они будут снова
+// вычислены из полученных значений.
 Grid resample(const Grid& source, std::size_t nx, std::size_t ny)
 {
     Grid result = source;
@@ -302,7 +339,7 @@ Grid resample(const Grid& source, std::size_t nx, std::size_t ny)
 Grid surfaceAsGrid(const Surface& surface)
 {
     Grid result = makeGridGeometry(surface, surface.nx, surface.ny);
-    std::transform(surface.gorid.begin(), surface.gorid.end(), result.values.begin(),
+    std::transform(surface.grid.begin(), surface.grid.end(), result.values.begin(),
         [](qreal value) { return static_cast<Scalar>(value); });
     return result;
 }
@@ -312,6 +349,12 @@ std::size_t ceilDivide(std::size_t value, std::size_t divisor)
     return value / divisor + (value % divisor != 0 ? 1 : 0);
 }
 
+// Иерархия строится по числу ИНТЕРВАЛОВ (nx-1, ny-1). На каждом шаге фактор
+// увеличивается вдвое, затем список разворачивается в порядок coarse-to-fine.
+// ceilDivide(...)+1 сохраняет общие физические границы для размеров, которые
+// не имеют вида 2^k+1; поэтому узлы соседних уровней не обязаны точно совпадать.
+// maxLevels является жестким пределом, а исходный finalNx*finalNy в любом
+// случае добавляется последним уровнем.
 std::vector<std::pair<std::size_t, std::size_t>> buildHierarchy(
     std::size_t finalNx,
     std::size_t finalNy,
@@ -353,6 +396,10 @@ Scalar valueAt(const Grid& grid, std::size_t ix, std::size_t iy)
     return grid.values[grid.index(ix, iy)];
 }
 
+// Производные нужны для Taylor-переноса значения контрольной точки на Snap-
+// узлы. Внутри сетки применяются центральные разности в физических единицах
+// x/y; у границы — односторонние разности или уменьшенный прямоугольник для
+// смешанной производной. Это не задает граничное условие основной задачи.
 Derivatives derivativesAtNode(const Grid& grid, std::size_t ix, std::size_t iy)
 {
     const Scalar hx = grid.dx();
@@ -415,6 +462,10 @@ Derivatives derivativesAtNode(const Grid& grid, std::size_t ix, std::size_t iy)
     return d;
 }
 
+// Сначала вычисляются пять полей производных в четырех углах содержащей ячейки,
+// затем каждое поле билинейно интерполируется в фактическую координату точки.
+// Таким образом, Taylor-модель описывает prior текущего уровня, а не сама по
+// себе восстанавливает производные из контрольных данных.
 Derivatives derivativesAt(const Grid& grid, Scalar x, Scalar y)
 {
     Scalar fx = std::clamp((x - grid.minx) / grid.dx(), Scalar(0),
@@ -450,6 +501,10 @@ struct CandidateNode {
     Scalar distanceSquared{};
 };
 
+// Выбирает requested ближайших узлов по евклидову расстоянию в КООРДИНАТАХ
+// ЯЧЕЕК: (ix-fx)^2 + (iy-fy)^2. При dx != dy это не совпадает с расстоянием в
+// физических координатах. Равные расстояния разрешаются плоским индексом, что
+// сохраняет детерминированный результат.
 std::vector<CandidateNode> nearestNodes(
     const Grid& grid, Scalar x, Scalar y, std::size_t requested)
 {
@@ -480,8 +535,9 @@ std::vector<CandidateNode> nearestNodes(
         }
     }
 
-    // Very thin grids near a boundary can need more candidates than the local
-    // square supplied.  Falling back to all nodes is rare and remains exact.
+    // Для очень тонкой сетки или точки у края локального квадрата может быть
+    // недостаточно. Редкий полный просмотр сохраняет точный результат именно
+    // поиска ближайших узлов (это не относится к exact-интерполяции значений).
     if (candidates.size() < requested) {
         candidates.clear();
         candidates.reserve(grid.values.size());
@@ -506,6 +562,10 @@ std::vector<CandidateNode> nearestNodes(
     return candidates;
 }
 
+// Число Snap-узлов уменьшается вместе с геометрическим средним шага сетки:
+//   N = round(initialN * sqrt((dx/dx0) * (dy/dy0))).
+// При двукратном изотропном уточнении это дает 16 -> 8 -> 4 -> 2 -> 1.
+// На финальном уровне одна точка всегда воздействует ровно на один Snap-узел.
 std::size_t snapNodeCount(
     const Grid& grid,
     const Grid& coarsest,
@@ -528,6 +588,21 @@ std::size_t snapNodeCount(
         static_cast<std::size_t>(std::floor(scaled + 0.5L)));
 }
 
+// Формирует мягкую Snap-часть квадратичного функционала.
+//
+// Для точки p и соседнего узла n строится Taylor-прогноз
+//   T_p(n) = value_p + grad(u_prior)_p * delta
+//          + 1/2 * delta^T * Hessian(u_prior)_p * delta.
+// Порядок ограничивается options.taylorOrder. Gaussian-коэффициенты
+//   k_pn = exp(-distanceCells^2 / (2*sigma^2))
+// нормируются ОТДЕЛЬНО для каждой точки, поэтому сумма ее коэффициентов по
+// выбранным узлам равна point.weight. Если в узел попали несколько точек, их
+// вклады складываются и образуют взвешенное смешивание прогнозов.
+//
+// Полученные diagonal/rhs кодируют
+//   snapStrength * sum_pn w_pn * (u_n - T_p(n))^2.
+// Поэтому Snap здесь является мягким штрафом, а не непосредственной записью
+// контрольного значения в grid. Gaussian-ядро — выбор данной реализации.
 void addSnapConstraints(
     const Grid& prior,
     const std::vector<CanonicalPoint>& points,
@@ -594,6 +669,9 @@ void addSnapConstraints(
     }
 }
 
+// Добавляет коэффициент в разреженную строку ограничения. Совпавшие индексы
+// объединяются; это происходит, например, на maxx/maxy, где два угла
+// билинейной ячейки могут обозначать один и тот же граничный узел.
 void addTerm(PointConstraint& constraint, std::size_t index, Scalar coefficient)
 {
     if (coefficient == 0) return;
@@ -606,6 +684,10 @@ void addTerm(PointConstraint& constraint, std::size_t index, Scalar coefficient)
     constraint.terms[constraint.count++] = {index, coefficient};
 }
 
+// Строит строку C_p билинейного оператора для каждой точки:
+//   C_p * u = sum_{k=1..4} c_k * u_k.
+// В строке остается от одного до четырех уникальных узлов, коэффициенты
+// неотрицательны и в точной арифметике суммируются в единицу.
 std::vector<PointConstraint> makePointConstraints(
     const Grid& grid, const std::vector<CanonicalPoint>& points)
 {
@@ -635,6 +717,22 @@ std::vector<PointConstraint> makePointConstraints(
     return result;
 }
 
+// Накапливает K*input в output, где K = smoothness * B^T*B — нормальный
+// оператор дискретной thin-plate/Hessian энергии
+//
+//   E(u) = smoothness * [
+//       sum ((dy/dx) * Dxx(u))^2
+//     + sum ((dx/dy) * Dyy(u))^2
+//     + 2 * sum (1/4 * Dxy4(u))^2 ].
+//
+// Отношения шагов учитывают форму прямоугольной ячейки до общего множителя.
+// Dxy4 использует четыре диагональных узла вокруг центра. Это cell-scaled
+// Hessian energy данной реализации, а не буквальная матрица Laplacian^2.
+//
+// Используются только шаблоны, целиком лежащие внутри grid: ghost-узлов и явно
+// заданных Dirichlet/Neumann условий нет. Поэтому граница является свободной
+// (natural), а любая аффинная плоскость принадлежит nullspace K. Функция
+// ДОБАВЛЯЕТ вклад в output и не очищает его.
 void applyCurvature(
     const Grid& grid,
     const std::vector<Scalar>& input,
@@ -688,6 +786,9 @@ void applyCurvature(
     }
 }
 
+// Вычисляет точную диагональ того же K для Jacobi-предобуславливателя PCG.
+// При изменении любого stencil или масштаба эту функцию необходимо менять
+// синхронно с applyCurvature(), иначе предобуславливатель станет несогласованным.
 std::vector<Scalar> curvatureDiagonal(const Grid& grid, Scalar smoothness)
 {
     std::vector<Scalar> diagonal(grid.values.size(), Scalar(0));
@@ -744,6 +845,8 @@ Scalar constraintValue(const PointConstraint& constraint,
 
 Scalar dot(const std::vector<Scalar>& a, const std::vector<Scalar>& b)
 {
+    // Более широкий аккумулятор уменьшает потерю точности в нормах и скалярных
+    // произведениях PCG; наружу все равно возвращается внутренний Scalar.
     long double result = 0;
     for (std::size_t i = 0; i < a.size(); ++i) {
         result += static_cast<long double>(a[i]) * static_cast<long double>(b[i]);
@@ -751,6 +854,19 @@ Scalar dot(const std::vector<Scalar>& a, const std::vector<Scalar>& b)
     return static_cast<Scalar>(result);
 }
 
+// Решает на одном уровне неявную симметричную положительно определенную систему
+// A*u = b, соответствующую сумме квадратичных штрафов:
+//
+//   A = K + priorWeight*I + diag(snapDiagonal)
+//         + sum_p finalStrength*w_p*c_p*c_p^T,
+//   b = priorWeight*prior + snapRhs
+//         + sum_p finalStrength*w_p*c_p*value_p.
+//
+// c_p — строка билинейного оператора точки. Финальная сумма присутствует только
+// на последнем уровне. Положительный priorWeight устраняет аффинное nullspace K
+// и гарантирует SPD даже там, где нет точечных штрафов. Матрица целиком не
+// хранится: applyA последовательно применяет все ее части. prior используется
+// как теплое начальное приближение x0.
 SolverResult solveLevel(
     const Grid& geometry,
     const std::vector<Scalar>& prior,
@@ -819,6 +935,8 @@ SolverResult solveLevel(
     const Scalar normalizer = std::max(rhsNorm, initialAxNorm);
     const Scalar tolerance = static_cast<Scalar>(options.relativeTolerance);
     const Scalar absoluteTolerance = static_cast<Scalar>(options.absoluteTolerance);
+    // Нормировка фиксируется по начальному состоянию и не меняется во время
+    // итераций: ||r|| <= absTol + relTol*max(||b||, ||A*x0||).
     const Scalar threshold = absoluteTolerance + tolerance * normalizer;
     if (!finite(normalizer) || !finite(threshold)) {
         throw std::runtime_error("PCG residual scale is not finite");
@@ -847,7 +965,8 @@ SolverResult solveLevel(
             residual[i] -= alpha * ad[i];
         }
 
-        // Periodically remove recursive-residual drift.
+        // Периодически пересчитываем r=b-A*x и перезапускаем сопряженное
+        // направление, устраняя накопившийся дрейф рекурсивной невязки.
         const bool restartDirection = (iteration + 1) % 50 == 0;
         if (restartDirection) {
             applyA(x, ax);
@@ -885,6 +1004,200 @@ SolverResult solveLevel(
     return result;
 }
 
+Scalar maximumAbsolute(const std::vector<Scalar>& values)
+{
+    Scalar result = 0;
+    for (Scalar value : values) {
+        if (!finite(value)) {
+            throw std::runtime_error("point-projection residual is not finite");
+        }
+        result = std::max(result, std::abs(value));
+    }
+    return result;
+}
+
+Scalar effectiveControlTolerance(
+    const std::vector<PointConstraint>& constraints,
+    const ConvergentGriddingOptions& options)
+{
+    Scalar valueScale = 1;
+    for (const PointConstraint& constraint : constraints) {
+        valueScale = std::max(valueScale, std::abs(constraint.value));
+    }
+    // controlTolerance — абсолютный пользовательский допуск. Нижняя граница
+    // учитывает точность публичного qreal, потому что именно в него в конце
+    // преобразуется grid; внутренняя точность double сама по себе недостаточна.
+    const Scalar roundingFloor = Scalar(64)
+        * static_cast<Scalar>(std::numeric_limits<qreal>::epsilon()) * valueScale;
+    return std::max(static_cast<Scalar>(options.controlTolerance), roundingFloor);
+}
+
+// Матрично-свободное умножение (C*C^T)*v в пространстве контрольных точек:
+// сначала scatter nodeWork=C^T*v, затем gather output=C*nodeWork.
+void applyConstraintGram(
+    const std::vector<PointConstraint>& constraints,
+    const std::vector<Scalar>& input,
+    std::vector<Scalar>& output,
+    std::vector<Scalar>& nodeWork)
+{
+    std::fill(nodeWork.begin(), nodeWork.end(), Scalar(0));
+    for (std::size_t i = 0; i < constraints.size(); ++i) {
+        for (std::size_t termIndex = 0;
+             termIndex < constraints[i].count; ++termIndex) {
+            const StencilTerm& term = constraints[i].terms[termIndex];
+            nodeWork[term.index] += term.coefficient * input[i];
+        }
+    }
+    for (std::size_t i = 0; i < constraints.size(); ++i) {
+        output[i] = constraintValue(constraints[i], nodeWork);
+        if (!finite(output[i])) {
+            throw std::runtime_error("point-constraint Gram product overflowed");
+        }
+    }
+}
+
+// После гладкого решения ищет минимальную по узловой L2-норме поправку delta:
+//
+//   C*(u + delta) = d,       min ||delta||_2,
+//   delta = C^T*lambda,
+//   (C*C^T)*lambda = d - C*u.
+//
+// Последняя система решается Jacobi-PCG в пространстве точек; диагональ
+// предобуславливателя равна квадрату нормы строки C_p. В hard-фазе weight не
+// масштабирует отдельное равенство: после объединения совпадающих точек все
+// оставшиеся C_p*u=value_p обязательны одинаково.
+//
+// Это евклидова проекция, НЕ equality-constrained minimum-curvature решение:
+// после поправки повторного сглаживания нет, а ее поддержка ограничена узлами
+// билинейных строк C. Зависимые либо несовместимые строки приводят к ошибке.
+ProjectionResult projectOntoPointConstraints(
+    Grid& grid,
+    const std::vector<PointConstraint>& constraints,
+    const ConvergentGriddingOptions& options)
+{
+    ProjectionResult result;
+    result.converged = true;
+    if (constraints.empty()) return result;
+
+    const std::size_t count = constraints.size();
+    const Scalar tolerance = effectiveControlTolerance(constraints, options);
+    std::vector<Scalar> rhs(count), residual(count), inverseDiagonal(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        rhs[i] = constraints[i].value
+            - constraintValue(constraints[i], grid.values);
+        Scalar diagonal = 0;
+        for (std::size_t termIndex = 0;
+             termIndex < constraints[i].count; ++termIndex) {
+            const Scalar coefficient = constraints[i].terms[termIndex].coefficient;
+            diagonal += coefficient * coefficient;
+        }
+        if (!finite(rhs[i]) || !finite(diagonal) || !(diagonal > 0)) {
+            throw std::runtime_error("invalid exact point constraint");
+        }
+        inverseDiagonal[i] = Scalar(1) / diagonal;
+    }
+
+    result.maxError = maximumAbsolute(rhs);
+    if (result.maxError <= tolerance) return result;
+
+    std::vector<Scalar> multiplier(count, Scalar(0));
+    residual = rhs;
+    std::vector<Scalar> preconditioned(count), direction(count), gramDirection(count);
+    std::vector<Scalar> gramMultiplier(count), nodeWork(grid.values.size(), Scalar(0));
+    for (std::size_t i = 0; i < count; ++i) {
+        preconditioned[i] = residual[i] * inverseDiagonal[i];
+    }
+    direction = preconditioned;
+    Scalar residualPreconditioned = dot(residual, preconditioned);
+
+    result.converged = false;
+    for (std::size_t iteration = 0;
+         iteration < options.maxControlProjectionIterations; ++iteration) {
+        applyConstraintGram(constraints, direction, gramDirection, nodeWork);
+        const Scalar denominator = dot(direction, gramDirection);
+        if (!(denominator > 0) || !finite(denominator)
+            || !(residualPreconditioned > 0)
+            || !finite(residualPreconditioned)) {
+            throw std::runtime_error(
+                "exact control equations are dependent or incompatible at this grid resolution");
+        }
+        const Scalar alpha = residualPreconditioned / denominator;
+        if (!finite(alpha)) {
+            throw std::runtime_error("exact-control projection produced a non-finite step");
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            multiplier[i] += alpha * direction[i];
+            residual[i] -= alpha * gramDirection[i];
+        }
+
+        const bool restartDirection = (iteration + 1) % 25 == 0;
+        if (restartDirection || maximumAbsolute(residual) <= tolerance) {
+            applyConstraintGram(constraints, multiplier, gramMultiplier, nodeWork);
+            for (std::size_t i = 0; i < count; ++i) {
+                residual[i] = rhs[i] - gramMultiplier[i];
+            }
+        }
+
+        result.iterations = iteration + 1;
+        result.maxError = maximumAbsolute(residual);
+        if (result.maxError <= tolerance) {
+            result.converged = true;
+            break;
+        }
+
+        for (std::size_t i = 0; i < count; ++i) {
+            preconditioned[i] = residual[i] * inverseDiagonal[i];
+        }
+        const Scalar nextResidualPreconditioned = dot(residual, preconditioned);
+        if (!(nextResidualPreconditioned > 0)
+            || !finite(nextResidualPreconditioned)) {
+            throw std::runtime_error(
+                "exact control equations are dependent or incompatible at this grid resolution");
+        }
+        if (restartDirection) {
+            direction = preconditioned;
+        } else {
+            const Scalar beta = nextResidualPreconditioned / residualPreconditioned;
+            for (std::size_t i = 0; i < count; ++i) {
+                direction[i] = preconditioned[i] + beta * direction[i];
+            }
+        }
+        residualPreconditioned = nextResidualPreconditioned;
+    }
+
+    if (!result.converged) {
+        throw std::runtime_error(
+            "exact control projection did not converge; controls may be incompatible "
+            "at this grid resolution");
+    }
+
+    std::fill(nodeWork.begin(), nodeWork.end(), Scalar(0));
+    for (std::size_t i = 0; i < count; ++i) {
+        for (std::size_t termIndex = 0;
+             termIndex < constraints[i].count; ++termIndex) {
+            const StencilTerm& term = constraints[i].terms[termIndex];
+            nodeWork[term.index] += term.coefficient * multiplier[i];
+        }
+    }
+    for (std::size_t i = 0; i < grid.values.size(); ++i) {
+        grid.values[i] += nodeWork[i];
+        if (!finite(grid.values[i])) {
+            throw std::runtime_error("exact-control correction produced a non-finite grid value");
+        }
+    }
+
+    result.maxError = 0;
+    for (const PointConstraint& constraint : constraints) {
+        result.maxError = std::max(result.maxError,
+            std::abs(constraintValue(constraint, grid.values) - constraint.value));
+    }
+    if (result.maxError > tolerance) {
+        throw std::runtime_error(
+            "exact-control correction lost accuracy while updating the grid");
+    }
+    return result;
+}
+
 Scalar maxControlError(const Grid& grid, const std::vector<CanonicalPoint>& points)
 {
     Scalar result = 0;
@@ -904,9 +1217,13 @@ ConvergentGriddingReport convergentGridding(
     const std::vector<CanonicalPoint> controls = validateInput(surface, points, options);
     ConvergentGriddingReport report;
     if (controls.empty()) {
-        return report; // The documented no-controls identity operation.
+        // Валидная поверхность без ненулевых контрольных точек не изменяется.
+        return report;
     }
 
+    // Самый грубый prior получается ресемплированием входной surface.grid.
+    // Отдельный тренд по точкам здесь не строится. Иерархия содержит общие
+    // min/max и заканчивается строго исходными surface.nx/surface.ny.
     const Grid input = surfaceAsGrid(surface);
     const auto hierarchy = buildHierarchy(surface.nx, surface.ny, options);
     Grid coarsest = resample(input, hierarchy.front().first, hierarchy.front().second);
@@ -914,17 +1231,27 @@ ConvergentGriddingReport convergentGridding(
 
     for (std::size_t levelIndex = 0; levelIndex < hierarchy.size(); ++levelIndex) {
         const auto [nx, ny] = hierarchy[levelIndex];
+        // Refine: первый prior уже имеет нужный грубый размер; далее решение
+        // предыдущего уровня билинейно переносится на более частую сетку.
         Grid prior = levelIndex == 0 ? coarsest : resample(solved, nx, ny);
         const bool finalLevel = levelIndex + 1 == hierarchy.size();
         const std::size_t snapNodes = snapNodeCount(prior, coarsest, finalLevel, options);
 
+        // Snap: контрольные значения Taylor-проецируются в ближайшие узлы и
+        // превращаются в диагональные мягкие штрафы текущего уровня.
         std::vector<Scalar> snapDiagonal(prior.values.size(), Scalar(0));
         std::vector<Scalar> snapRhs(prior.values.size(), Scalar(0));
         addSnapConstraints(prior, controls, snapNodes, options, snapDiagonal, snapRhs);
+
+        // На финальном уровне добавляется мягкая билинейная привязка C_p*u=d_p.
+        // Она уменьшает величину последующей exact-поправки, но не заменяет ее.
         const std::vector<PointConstraint> finalConstraints = finalLevel
             ? makePointConstraints(prior, controls)
             : std::vector<PointConstraint>{};
 
+        // Smooth: PCG балансирует кривизну, сохранение prior, Snap и (только на
+        // последнем уровне) билинейные ограничения. При разрешенной
+        // несходимости последний iterate все равно передается на следующий этап.
         SolverResult level = solveLevel(prior, prior.values, snapDiagonal, snapRhs,
                                         finalConstraints, options);
         report.levels.push_back({nx, ny, snapNodes, level.iterations,
@@ -937,6 +1264,19 @@ ConvergentGriddingReport convergentGridding(
         solved.values = std::move(level.values);
     }
 
+    // Soft-решение обычно лишь приближенно выполняет C*u=d. Опциональная
+    // проекция доводит билинейные значения до exact-допуска отдельным решением
+    // в пространстве контрольных точек.
+    const std::vector<PointConstraint> outputConstraints =
+        makePointConstraints(solved, controls);
+    if (options.enforceExactControls) {
+        const ProjectionResult projection = projectOntoPointConstraints(
+            solved, outputConstraints, options);
+        report.controlProjectionIterations = projection.iterations;
+    }
+
+    // Публичный qreal может быть уже внутреннего double, поэтому преобразование
+    // выполняется во временный буфер и проверяется до изменения surface.grid.
     std::vector<qreal> output(solved.values.size());
     std::transform(solved.values.begin(), solved.values.end(), output.begin(),
         [](Scalar value) {
@@ -950,14 +1290,24 @@ ConvergentGriddingReport convergentGridding(
             return converted;
         });
 
-    // Report the residual of the values that are actually returned, including
-    // any loss of precision when a Qt build uses a narrower qreal.
+    // Отчет измеряет невязку именно возвращаемых значений, включая возможную
+    // потерю точности, когда qreal в Qt-сборке уже внутреннего Scalar.
     Grid returned = solved;
     std::transform(output.begin(), output.end(), returned.values.begin(),
         [](qreal value) { return static_cast<Scalar>(value); });
     report.maxControlError = static_cast<qreal>(maxControlError(returned, controls));
+    const Scalar acceptedControlError = effectiveControlTolerance(
+        outputConstraints, options);
+    report.controlsSatisfied = static_cast<Scalar>(report.maxControlError)
+        <= acceptedControlError;
+    if (options.enforceExactControls && !report.controlsSatisfied) {
+        throw std::runtime_error(
+            "qreal precision is insufficient to retain the exact control-point correction");
+    }
 
-    surface.gorid = std::move(output);
+    // Единственная запись в объект пользователя: все вычисления, exact-проекция,
+    // преобразование и проверки уже завершены (strong exception guarantee).
+    surface.grid = std::move(output);
     return report;
 }
 
