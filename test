@@ -1,32 +1,32 @@
 # =============================================================================
 # GeoSchemeDocs.cmake
-# Р¦РµРЅС‚СЂР°Р»РёР·РѕРІР°РЅРЅС‹Р№ РјРѕРґСѓР»СЊ СЃР±РѕСЂРєРё QDoc-РґРѕРєСѓРјРµРЅС‚Р°С†РёРё РґР»СЏ РџРћ В«Р“РµРѕСЃС…РµРјР°В».
+# Централизованный модуль сборки QDoc-документации для ПО «Геосхема».
 #
-# РџРѕРґРєР»СЋС‡Р°РµС‚СЃСЏ РёР· РєРѕСЂРЅРµРІРѕРіРѕ CMakeLists.txt Р‘Р•Р— СѓСЃР»РѕРІРёСЏ:
+# Подключается из корневого CMakeLists.txt БЕЗ условия:
 #   include(GeoSchemeDocs.cmake)
 #
-# РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ РІ РјРѕРґСѓР»СЊРЅРѕРј CMakeLists.txt:
+# Использование в модульном CMakeLists.txt:
 #   if (GEOSCHEME_BUILD_DOCS)
 #       gs_add_doc_target(GeoProjectData GeoProjectData.qdocconf)
 #   endif()
 #
-# РџРѕСЃР»Рµ РІСЃРµС… add_subdirectory() РІ РєРѕСЂРЅРµРІРѕРј CMakeLists.txt:
+# После всех add_subdirectory() в корневом CMakeLists.txt:
 #   gs_finalize_doc_index()
 #
-# Р—Р°РїСѓСЃРє РґРѕРєСѓРјРµРЅС‚Р°С†РёРё (С‚РѕР»СЊРєРѕ РїРѕСЃР»Рµ РїРѕР»РЅРѕР№ СЃР±РѕСЂРєРё РїСЂРѕРµРєС‚Р°):
+# Запуск документации (только после полной сборки проекта):
 #   mingw32-make docs_GeoScheme_index
 #
-# РџРµСЂРµСЃР±РѕСЂРєР° РѕРґРЅРѕРіРѕ РјРѕРґСѓР»СЏ:
+# Пересборка одного модуля:
 #   mingw32-make docs_GeoProjectData_rebuild
 #
-# РџРѕР»РЅР°СЏ РїРµСЂРµСЃР±РѕСЂРєР° РІСЃРµР№ РґРѕРєСѓРјРµРЅС‚Р°С†РёРё СЃ РЅСѓР»СЏ:
+# Полная пересборка всей документации с нуля:
 #   mingw32-make docs_rebuild_all
 # =============================================================================
 
 
 # -----------------------------------------------------------------------------
-# Р’РЅСѓС‚СЂРµРЅРЅРёР№ РјР°РєСЂРѕСЃ: РїРѕРёСЃРє qdoc С‡РµСЂРµР· Qt5::Core LOCATION.
-# Р РµР·СѓР»СЊС‚Р°С‚ РєРµС€РёСЂСѓРµС‚СЃСЏ РІ QDOC_EXECUTABLE - РїРѕРІС‚РѕСЂРЅС‹Рµ РІС‹Р·РѕРІС‹ РјРіРЅРѕРІРµРЅРЅС‹.
+# Внутренний макрос: поиск qdoc через Qt5::Core LOCATION.
+# Результат кешируется в QDOC_EXECUTABLE - повторные вызовы мгновенны.
 # -----------------------------------------------------------------------------
 macro(_gs_find_qdoc)
     if (NOT QDOC_EXECUTABLE)
@@ -54,12 +54,12 @@ endmacro()
 
 
 # -----------------------------------------------------------------------------
-# Р’РЅСѓС‚СЂРµРЅРЅРёР№ РјР°РєСЂРѕСЃ: РІС‹С‡РёСЃР»СЏРµС‚ Qt-РѕРєСЂСѓР¶РµРЅРёРµ Рё РїСѓС‚Рё Рє MinGW С‚СѓР»С‡РµР№РЅСѓ.
+# Внутренний макрос: вычисляет Qt-окружение и пути к MinGW тулчейну.
 #
-# Р’СЃРµ РїСѓС‚Рё РІС‹С‡РёСЃР»СЏСЋС‚СЃСЏ РёР· СЂРµР°Р»СЊРЅРѕР№ СЃС‚СЂСѓРєС‚СѓСЂС‹ РґРёСЂРµРєС‚РѕСЂРёР№ Qt РЅР° РґРёСЃРєРµ.
-# execute_process СЃ qmake РЅРµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ - РЅРµРЅР°РґРµР¶РµРЅ РІРЅСѓС‚СЂРё CMake.
+# Все пути вычисляются из реальной структуры директорий Qt на диске.
+# execute_process с qmake не используется - ненадежен внутри CMake.
 #
-# РЎС‚СЂСѓРєС‚СѓСЂР° РґРёСЂРµРєС‚РѕСЂРёР№ Qt (РёР· Qt Creator Kit):
+# Структура директорий Qt (из Qt Creator Kit):
 #   C:\Qt\Qt5.14.2\                         <- _gs_qt_sdk_root
 #       5.14.2\
 #           mingw73_64\                     <- _gs_qt_root, _gs_qt_prefix
@@ -126,13 +126,13 @@ endmacro()
 
 
 # -----------------------------------------------------------------------------
-# Р’РЅСѓС‚СЂРµРЅРЅРёР№ РјР°РєСЂРѕСЃ: РІС‹С‡РёСЃР»СЏРµС‚ Р±РµР·РѕРїР°СЃРЅС‹Р№ PATH РґР»СЏ Р·Р°РїСѓСЃРєР° qdoc.
+# Внутренний макрос: вычисляет безопасный PATH для запуска qdoc.
 #
-# РЈР±РёСЂР°РµС‚ Qt 5.12.x РёР· PATH - embedded clang Р°РІС‚РѕРґРµС‚РµРєС‚РёСЂСѓРµС‚ GCC С‡РµСЂРµР·
-# PATH (gcc -v) Рё РјРѕР¶РµС‚ РЅР°Р№С‚Рё СЃС‚Р°СЂС‹Р№ MinGW -> РѕС€РёР±РєРё type_traits.
-# Qt 5.14.x СЃС‚Р°РІРёРј РїРµСЂРІС‹Рј.
+# Убирает Qt 5.12.x из PATH - embedded clang автодетектирует GCC через
+# PATH (gcc -v) и может найти старый MinGW -> ошибки type_traits.
+# Qt 5.14.x ставим первым.
 #
-# Р’РђР–РќРћ: РІС‹Р·С‹РІР°С‚СЊ С‚РѕР»СЊРєРѕ РџРћРЎР›Р• _gs_compute_qt_env().
+# ВАЖНО: вызывать только ПОСЛЕ _gs_compute_qt_env().
 # -----------------------------------------------------------------------------
 macro(_gs_compute_safe_path)
     if (NOT DEFINED _gs_qt_root OR NOT DEFINED _gs_mingw_root)
@@ -164,20 +164,21 @@ endmacro()
 # -----------------------------------------------------------------------------
 # _gs_collect_includes(TARGET OUT_INCLUDES OUT_TARGETS VISITED)
 #
-# Р РµРєСѓСЂСЃРёРІРЅРѕ РѕР±С…РѕРґРёС‚ РіСЂР°С„ Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ С‚Р°СЂРіРµС‚Р° (target_link_libraries)
-# Рё СЃРѕР±РёСЂР°РµС‚ Р’РЎР• СѓРЅРёРєР°Р»СЊРЅС‹Рµ include-РїСѓС‚Рё РёР·:
-#   - INCLUDE_DIRECTORIES        (РїСЂРёРІР°С‚РЅС‹Рµ РїСѓС‚Рё С‚Р°СЂРіРµС‚Р°)
-#   - INTERFACE_INCLUDE_DIRECTORIES (РїСѓР±Р»РёС‡РЅС‹Рµ РїСѓС‚Рё РґР»СЏ РїРѕС‚СЂРµР±РёС‚РµР»РµР№)
-#   - LINK_LIBRARIES             (СЂРµРєСѓСЂСЃРёРІРЅРѕ РїРѕ РІСЃРµРј Р·Р°РІРёСЃРёРјРѕСЃС‚СЏРј)
-#   - INTERFACE_LINK_LIBRARIES   (СЂРµРєСѓСЂСЃРёРІРЅРѕ РїРѕ РёРЅС‚РµСЂС„РµР№СЃРЅС‹Рј Р·Р°РІРёСЃРёРјРѕСЃС‚СЏРј)
+# Рекурсивно обходит граф зависимостей таргета (target_link_libraries)
+# и собирает ВСЕ уникальные include-пути из:
+#   - INCLUDE_DIRECTORIES        (приватные пути таргета)
+#   - INTERFACE_INCLUDE_DIRECTORIES (публичные пути для потребителей)
+#   - LINK_LIBRARIES             (рекурсивно по всем зависимостям)
+#   - INTERFACE_LINK_LIBRARIES   (рекурсивно по интерфейсным зависимостям)
+#   - AUTOGEN_BUILD_DIR/include  (сгенерированные ui_*.h от AUTOUIC)
 #
-# Р—Р°С‰РёС‚Р° РѕС‚ С†РёРєР»РёС‡РµСЃРєРёС… Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ С‡РµСЂРµР· СЃРїРёСЃРѕРє VISITED.
-# Generator expressions РІРёРґР° $<BUILD_INTERFACE:path> СЂР°СЃРєСЂС‹РІР°СЋС‚СЃСЏ,
-# РѕСЃС‚Р°Р»СЊРЅС‹Рµ ($<CONFIG:...> Рё С‚.Рї.) РїСЂРѕРїСѓСЃРєР°СЋС‚СЃСЏ.
+# Защита от циклических зависимостей через список VISITED.
+# Generator expressions вида $<BUILD_INTERFACE:path> раскрываются,
+# остальные ($<CONFIG:...> и т.п.) пропускаются.
 # -----------------------------------------------------------------------------
 function(_gs_collect_includes TARGET OUT_INCLUDES OUT_TARGETS VISITED)
 
-    # Р—Р°С‰РёС‚Р° РѕС‚ С†РёРєР»РѕРІ Рё РїРѕРІС‚РѕСЂРЅРѕР№ РѕР±СЂР°Р±РѕС‚РєРё
+    # Защита от циклов и повторной обработки
     if ("${TARGET}" IN_LIST VISITED)
         return()
     endif()
@@ -191,7 +192,7 @@ function(_gs_collect_includes TARGET OUT_INCLUDES OUT_TARGETS VISITED)
 
     set(_local_includes "")
 
-    # INCLUDE_DIRECTORIES - РїСЂРёРІР°С‚РЅС‹Рµ РїСѓС‚Рё С‚Р°СЂРіРµС‚Р°
+    # INCLUDE_DIRECTORIES - приватные пути таргета
     get_target_property(_dirs ${TARGET} INCLUDE_DIRECTORIES)
     if (_dirs)
         foreach(_dir ${_dirs})
@@ -203,7 +204,7 @@ function(_gs_collect_includes TARGET OUT_INCLUDES OUT_TARGETS VISITED)
         endforeach()
     endif()
 
-    # INTERFACE_INCLUDE_DIRECTORIES - РїСѓР±Р»РёС‡РЅС‹Рµ РїСѓС‚Рё
+    # INTERFACE_INCLUDE_DIRECTORIES - публичные пути
     get_target_property(_idirs ${TARGET} INTERFACE_INCLUDE_DIRECTORIES)
     if (_idirs)
         foreach(_dir ${_idirs})
@@ -215,7 +216,7 @@ function(_gs_collect_includes TARGET OUT_INCLUDES OUT_TARGETS VISITED)
         endforeach()
     endif()
 
-    # Р РµРєСѓСЂСЃРёРІРЅС‹Р№ РѕР±С…РѕРґ LINK_LIBRARIES
+    # Рекурсивный обход LINK_LIBRARIES
     get_target_property(_libs ${TARGET} LINK_LIBRARIES)
     if (_libs)
         foreach(_lib ${_libs})
@@ -235,7 +236,7 @@ function(_gs_collect_includes TARGET OUT_INCLUDES OUT_TARGETS VISITED)
         endforeach()
     endif()
 
-    # Р РµРєСѓСЂСЃРёРІРЅС‹Р№ РѕР±С…РѕРґ INTERFACE_LINK_LIBRARIES
+    # Рекурсивный обход INTERFACE_LINK_LIBRARIES
     get_target_property(_ilibs ${TARGET} INTERFACE_LINK_LIBRARIES)
     if (_ilibs)
         foreach(_lib ${_ilibs})
@@ -255,6 +256,22 @@ function(_gs_collect_includes TARGET OUT_INCLUDES OUT_TARGETS VISITED)
         endforeach()
     endif()
 
+    # AUTOGEN_BUILD_DIR/include - здесь CMake/AUTOUIC кладёт сгенерированные
+    # ui_*.h заголовки. Без этого пути qdoc не найдёт ui_Form.h и упадёт
+    # с "file not found" на любом классе, использующем Qt Designer формы.
+    get_target_property(_gs_autogen_dir ${TARGET} AUTOGEN_BUILD_DIR)
+    if (NOT _gs_autogen_dir)
+        # Fallback для случаев, когда свойство ещё не заполнено CMake:
+        # стандартный путь автогенерации - <бинарная_папка_таргета>/<Target>_autogen
+        get_target_property(_gs_bin_dir ${TARGET} BINARY_DIR)
+        if (_gs_bin_dir)
+            set(_gs_autogen_dir "${_gs_bin_dir}/${TARGET}_autogen")
+        endif()
+    endif()
+    if (_gs_autogen_dir)
+        list(APPEND _local_includes "${_gs_autogen_dir}/include")
+    endif()
+
     set(${OUT_INCLUDES} ${_local_includes} PARENT_SCOPE)
 
 endfunction()
@@ -263,27 +280,27 @@ endfunction()
 # -----------------------------------------------------------------------------
 # _gs_build_include_path_args(MODULE_NAME QT_HEADERS MINGW_PATHS OUT_ARGS)
 #
-# РЎРѕР±РёСЂР°РµС‚ РїРѕР»РЅС‹Р№ СЃРїРёСЃРѕРє --include-path Р°СЂРіСѓРјРµРЅС‚РѕРІ РґР»СЏ РєРѕРјР°РЅРґРЅРѕР№ СЃС‚СЂРѕРєРё qdoc:
-#   1. MinGW СЃС‚Р°РЅРґР°СЂС‚РЅС‹Рµ Р·Р°РіРѕР»РѕРІРєРё C++ (type_traits, cstddef Рё С‚.Рї.)
-#   2. Qt Р·Р°РіРѕР»РѕРІРєРё (РІСЃРµ РѕСЃРЅРѕРІРЅС‹Рµ РїРѕРґРјРѕРґСѓР»Рё)
-#   3. Р’СЃРµ include-РїСѓС‚Рё РёР· MODULE_NAME Рё РµРіРѕ Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ (СЂРµРєСѓСЂСЃРёРІРЅРѕ)
+# Собирает полный список -I аргументов для командной строки qdoc:
+#   1. MinGW стандартные заголовки C++ (type_traits, cstddef и т.п.)
+#   2. Qt заголовки (все основные подмодули)
+#   3. Все include-пути из MODULE_NAME и его зависимостей (рекурсивно)
 #
-# --include-path РїРµСЂРµРґР°РµС‚ РїСѓС‚Рё РЅР°РїСЂСЏРјСѓСЋ РІ embedded clang - РѕРЅРё СЂР°Р±РѕС‚Р°СЋС‚
-# Р”Рћ Рё Р’Рћ Р’Р Р•РњРЇ СЃР±РѕСЂРєРё PCH РІ Temp-РїР°РїРєРµ, РіРґРµ РїРµСЂРµРјРµРЅРЅС‹Рµ РѕРєСЂСѓР¶РµРЅРёСЏ
-# MINGW_* РёР· .qdocconf РЅРµРґРѕСЃС‚СѓРїРЅС‹.
+# -I передаёт пути напрямую в embedded clang - они работают
+# ДО и ВО ВРЕМЯ сборки PCH в Temp-папке, где переменные окружения
+# MINGW_* из .qdocconf недоступны.
 # -----------------------------------------------------------------------------
 function(_gs_build_include_path_args MODULE_NAME QT_HEADERS MINGW_PATHS OUT_ARGS)
 
     set(_args "")
 
-    # 1. MinGW СЃС‚Р°РЅРґР°СЂС‚РЅС‹Рµ Р·Р°РіРѕР»РѕРІРєРё C++
+    # 1. MinGW стандартные заголовки C++
     foreach(_mingw_path ${MINGW_PATHS})
         if (EXISTS "${_mingw_path}")
-            list(APPEND _args "--include-path" "${_mingw_path}")
+            list(APPEND _args "-I${_mingw_path}")
         endif()
     endforeach()
 
-    # 2. Qt Р·Р°РіРѕР»РѕРІРєРё - РІСЃРµ РѕСЃРЅРѕРІРЅС‹Рµ РїРѕРґРјРѕРґСѓР»Рё
+    # 2. Qt заголовки - все основные подмодули
     foreach(_sub "" "QtCore" "QtGui" "QtWidgets" "QtXml"
                     "QtSql" "QtNetwork" "QtSvg" "QtPrintSupport" "QtConcurrent")
         if (_sub STREQUAL "")
@@ -292,11 +309,11 @@ function(_gs_build_include_path_args MODULE_NAME QT_HEADERS MINGW_PATHS OUT_ARGS
             set(_qt_path "${QT_HEADERS}/${_sub}")
         endif()
         if (EXISTS "${_qt_path}")
-            list(APPEND _args "--include-path" "${_qt_path}")
+            list(APPEND _args "-I${_qt_path}")
         endif()
     endforeach()
 
-    # 3. Р РµРєСѓСЂСЃРёРІРЅС‹Р№ СЃР±РѕСЂ РёР· С‚Р°СЂРіРµС‚Р° Рё РІСЃРµС… РµРіРѕ Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№
+    # 3. Рекурсивный сбор из таргета и всех его зависимостей
     if (TARGET ${MODULE_NAME})
         set(_visited "")
         set(_module_includes "")
@@ -312,7 +329,7 @@ function(_gs_build_include_path_args MODULE_NAME QT_HEADERS MINGW_PATHS OUT_ARGS
             set(_count 0)
             foreach(_inc ${_module_includes})
                 if (EXISTS "${_inc}")
-                    list(APPEND _args "--include-path" "${_inc}")
+                    list(APPEND _args "-I${_inc}")
                     math(EXPR _count "${_count} + 1")
                 endif()
             endforeach()
@@ -332,14 +349,14 @@ endfunction()
 # -----------------------------------------------------------------------------
 # gs_add_doc_target(MODULE_NAME QDOCCONF_FILENAME)
 #
-# Р РµРіРёСЃС‚СЂРёСЂСѓРµС‚ СЃР±РѕСЂРєСѓ РґРѕРєСѓРјРµРЅС‚Р°С†РёРё РѕРґРЅРѕРіРѕ РјРѕРґСѓР»СЏ.
+# Регистрирует сборку документации одного модуля.
 #
-# Include-РїСѓС‚Рё СЃРѕР±РёСЂР°СЋС‚СЃСЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё РёР· С‚Р°СЂРіРµС‚Р° MODULE_NAME Рё РІСЃРµС…
-# РµРіРѕ С‚СЂР°РЅР·РёС‚РёРІРЅС‹С… Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ (С‡РµСЂРµР· target_link_libraries СЂРµРєСѓСЂСЃРёРІРЅРѕ).
-# Р­С‚Рѕ РѕР·РЅР°С‡Р°РµС‚ С‡С‚Рѕ РґР»СЏ РЅРѕРІРѕРіРѕ РјРѕРґСѓР»СЏ РґРѕСЃС‚Р°С‚РѕС‡РЅРѕ РѕРґРЅРѕР№ СЃС‚СЂРѕРєРё РІС‹Р·РѕРІР° -
-# РЅРµ РЅСѓР¶РЅРѕ РІСЂСѓС‡РЅСѓСЋ РїСЂРѕРїРёСЃС‹РІР°С‚СЊ РїСѓС‚Рё РІ .qdocconf.
+# Include-пути собираются автоматически из таргета MODULE_NAME и всех
+# его транзитивных зависимостей (через target_link_libraries рекурсивно).
+# Это означает что для нового модуля достаточно одной строки вызова -
+# не нужно вручную прописывать пути в .qdocconf.
 #
-# РўР°СЂРіРµС‚ РќР• РІС…РѕРґРёС‚ РІ ALL - Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ СЏРІРЅРѕ РїРѕСЃР»Рµ РїРѕР»РЅРѕР№ СЃР±РѕСЂРєРё РїСЂРѕРµРєС‚Р°.
+# Таргет НЕ входит в ALL - запускается явно после полной сборки проекта.
 # -----------------------------------------------------------------------------
 function(gs_add_doc_target MODULE_NAME QDOCCONF_FILENAME)
 
@@ -365,7 +382,7 @@ function(gs_add_doc_target MODULE_NAME QDOCCONF_FILENAME)
         message(WARNING "[Docs] ${MODULE_NAME}: qdocconf not found: ${_gs_mod_conf}")
     endif()
 
-    # РЎРѕР±РёСЂР°РµРј --include-path Р°СЂРіСѓРјРµРЅС‚С‹ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё
+    # Собираем -I аргументы автоматически
     set(_gs_mingw_paths
         "${_gs_mingw_cxx}"
         "${_gs_mingw_cxx_arch}"
@@ -405,6 +422,7 @@ function(gs_add_doc_target MODULE_NAME QDOCCONF_FILENAME)
                     "PATH=${_gs_safe_path}"
                     "${QDOC_EXECUTABLE}"
                     --no-link-errors
+                    -std=c++14
                     ${_gs_include_path_args}
                     "${_gs_mod_conf}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gs_out_dir}"
@@ -442,9 +460,9 @@ endfunction()
 # -----------------------------------------------------------------------------
 # gs_finalize_doc_index()
 #
-# Р’С‹Р·С‹РІР°РµС‚СЃСЏ РћР”РРќ Р РђР— РёР· РєРѕСЂРЅРµРІРѕРіРѕ CMakeLists.txt - РџРћРЎР›Р• РІСЃРµС… add_subdirectory().
-# РЎРѕР±РёСЂР°РµС‚ СЃРІРѕРґРЅС‹Р№ РёРЅРґРµРєСЃ GeoScheme.qdocconf.
-# РЈСЃС‚СЂР°РЅСЏРµС‚ РіРѕРЅРєСѓ - РёРЅРґРµРєСЃ РїРёС€РµС‚СЃСЏ СЃС‚СЂРѕРіРѕ РїРѕСЃР»Рµ РІСЃРµС… РјРѕРґСѓР»РµР№.
+# Вызывается ОДИН РАЗ из корневого CMakeLists.txt - ПОСЛЕ всех add_subdirectory().
+# Собирает сводный индекс GeoScheme.qdocconf.
+# Устраняет гонку - индекс пишется строго после всех модулей.
 # -----------------------------------------------------------------------------
 function(gs_finalize_doc_index)
 
@@ -476,14 +494,14 @@ function(gs_finalize_doc_index)
         message(WARNING "[Docs] GeoScheme index: config not found: ${_gs_main_conf}")
     endif()
 
-    # Р‘Р°Р·РѕРІС‹Рµ --include-path РґР»СЏ СЃРІРѕРґРЅРѕРіРѕ РёРЅРґРµРєСЃР° (MinGW + Qt)
+    # Базовые -I для сводного индекса (MinGW + Qt)
     set(_gs_index_include_args "")
 
     foreach(_mingw_path
             "${_gs_mingw_cxx}" "${_gs_mingw_cxx_arch}" "${_gs_mingw_cxx_back}"
             "${_gs_mingw_inc}"  "${_gs_mingw_sys}")
         if (EXISTS "${_mingw_path}")
-            list(APPEND _gs_index_include_args "--include-path" "${_mingw_path}")
+            list(APPEND _gs_index_include_args "-I${_mingw_path}")
         endif()
     endforeach()
 
@@ -495,7 +513,7 @@ function(gs_finalize_doc_index)
             set(_qt_path "${_gs_qt_headers}/${_sub}")
         endif()
         if (EXISTS "${_qt_path}")
-            list(APPEND _gs_index_include_args "--include-path" "${_qt_path}")
+            list(APPEND _gs_index_include_args "-I${_qt_path}")
         endif()
     endforeach()
 
@@ -523,6 +541,7 @@ function(gs_finalize_doc_index)
                     "PATH=${_gs_safe_path}"
                     "${QDOC_EXECUTABLE}"
                     --no-link-errors
+                    -std=c++14
                     ${_gs_index_include_args}
                     "${_gs_main_conf}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${_gs_out_dir}"
@@ -551,3 +570,85 @@ function(gs_finalize_doc_index)
     )
 
 endfunction()
+
+
+# =============================================================================
+# ModelImpExp.qdocconf
+# Документация модуля ModelImpExp
+# =============================================================================
+
+project                 = ModelImpExp
+description             = Модуль импорта/экспорта моделей ПО «Геосхема»
+version                 = 1.0.0
+
+# Подключение общих Qt qdocconf-фрагментов (стили, макросы, дефайны)
+include($(QT_INSTALL_DOCS)/global/compat.qdocconf)
+include($(QT_INSTALL_DOCS)/global/macros.qdocconf)
+include($(QT_INSTALL_DOCS)/global/qt-cpp-defines.qdocconf)
+include($(QT_INSTALL_DOCS)/global/fileextensions.qdocconf)
+include($(QT_INSTALL_DOCS)/global/html-config.qdocconf)
+
+# Какие каталоги сканировать на предмет исходников/заголовков
+sourcedirs               = .
+headerdirs                = .
+
+sources.fileextensions    = "*.cpp"
+headers.fileextensions     = "*.h *.hpp"
+
+# Куда класть результат - путь совпадает с _gs_out_dir из CMake:
+#   <project_root>/doc/qdoc/html/ModelImpExp
+# Путь указывается относительно расположения этого .qdocconf
+outputdir                 = ../../doc/qdoc/html/ModelImpExp
+outputformats              = HTML
+
+# Если модуль использует классы из других модулей (например,
+# IGeoDataModule определён в GeoProjectData) - подключите их .index,
+# иначе \reimp и перекрёстные ссылки не найдут документацию:
+indexes                   = ../../doc/qdoc/html/GeoProjectData/GeoProjectData.index
+
+# Обязательно для последующей сборки сводного индекса -
+# без этого qdoc не создаст .index файл для этого модуля
+generateindex              = true
+
+# Примеры и картинки - если не используются, оставить пустыми
+exampledirs                =
+imagedirs                  =
+
+# Не заваливать сборку из-за отсутствующих миниатюр
+manifestmeta.thumbnail.names =
+
+
+
+
+
+# =============================================================================
+# GeoScheme.qdocconf
+# Сводный индекс документации всего проекта «Геосхема»
+# =============================================================================
+
+project                 = GeoScheme
+description             = ПО «Геосхема» — сводная документация
+version                 = 1.0.0
+
+include($(QT_INSTALL_DOCS)/global/compat.qdocconf)
+include($(QT_INSTALL_DOCS)/global/macros.qdocconf)
+include($(QT_INSTALL_DOCS)/global/qt-cpp-defines.qdocconf)
+include($(QT_INSTALL_DOCS)/global/fileextensions.qdocconf)
+include($(QT_INSTALL_DOCS)/global/html-config.qdocconf)
+
+# Сводный индекс не сканирует исходники сам - он только собирает
+# уже готовые .index файлы модулей
+sourcedirs                =
+headerdirs                 =
+
+# Список .index файлов ВСЕХ модулей - дополняйте по мере роста проекта
+indexes = ../html/GeoProjectData/GeoProjectData.index \
+          ../html/ModelImpExp/ModelImpExp.index \
+          ../html/GeoImpExp/GeoImpExp.index \
+          ../html/PythonEngine/PythonEngine.index
+
+outputdir                  = ../html/GeoScheme
+outputformats               = HTML
+
+exampledirs                 =
+imagedirs                   =
